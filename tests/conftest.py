@@ -134,6 +134,12 @@ class Snapshot:
             test_name = self.default_test_name
 
         snapshot_path = self._get_snapshot_path(test_name)
+        
+        if force_update:
+            # Update the snapshot
+            with open(snapshot_path, "wb") as f:
+                pickle.dump(actual, f)
+            return
 
         # Load the snapshot
         with open(snapshot_path, "rb") as f:

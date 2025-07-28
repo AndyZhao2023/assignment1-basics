@@ -72,24 +72,47 @@ def train_bpe(input_path: str, vocab_size: int, special_tokens: List[str]) -> Tu
     
     merges = []
     
-    # 2. Pre-tokenize the text and count initial word frequencies in parallel
+    # 2. Pre-tokenize the text and count initial word frequencies
     reverse_vocab = {v: k for k, v in vocab.items()}
-    num_processes = cpu_count()
-    with open(input_path, 'rb') as f:
-        # Use the first special token as the split token, or a default if none are provided
-        split_token = special_tokens[0].encode('utf-8') if special_tokens else b'\n'
-        chunk_boundaries = find_chunk_boundaries(f, num_processes, split_token)
+    
+    # Check file size and use multiprocessing only for larger files (>1MB)
+    import os
+    file_size = os.path.getsize(input_path)
+    use_multiprocessing = file_size > 1024 * 1024  # 1MB threshold
+    
+    if use_multiprocessing:
+        num_processes = cpu_count()
+        with open(input_path, 'rb') as f:
+            # Use the first special token as the split token, or a default if none are provided
+            split_token = special_tokens[0].encode('utf-8') if special_tokens else b'\n'
+            chunk_boundaries = find_chunk_boundaries(f, num_processes, split_token)
 
-    pool = Pool(num_processes)
-    process_chunk_partial = partial(_process_chunk, input_path=input_path, special_tokens=special_tokens, reverse_vocab=reverse_vocab)
-    chunk_word_counts = pool.map(process_chunk_partial, zip(chunk_boundaries[:-1], chunk_boundaries[1:]))
-    pool.close()
-    pool.join()
+        pool = Pool(num_processes)
+        process_chunk_partial = partial(_process_chunk, input_path=input_path, special_tokens=special_tokens, reverse_vocab=reverse_vocab)
+        chunk_word_counts = pool.map(process_chunk_partial, zip(chunk_boundaries[:-1], chunk_boundaries[1:]))
+        pool.close()
+        pool.join()
 
-    # Aggregate word counts from all processes
-    word_counts = Counter()
-    for counts in chunk_word_counts:
-        word_counts.update(counts)
+        # Aggregate word counts from all processes
+        word_counts = Counter()
+        for counts in chunk_word_counts:
+            word_counts.update(counts)
+    else:
+        # Single-threaded processing for smaller files
+        word_counts = Counter()
+        pre_tokenizer = get_pre_tokenizer(special_tokens)
+        special_tokens_set = set(token.encode('utf-8') for token in special_tokens)
+
+        with open(input_path, 'r', encoding='utf-8') as f:
+            text = f.read()
+
+        for pre_token_str in pre_tokenizer.pre_tokenize(text):
+            encoded_token = pre_token_str.encode('utf-8')
+            if encoded_token in special_tokens_set:
+                word_tuple = (reverse_vocab[encoded_token],)
+            else:
+                word_tuple = tuple(encoded_token)
+            word_counts[word_tuple] += 1
 
     # 3. Compute initial pair statistics
     stats = _get_stats(word_counts)
@@ -101,8 +124,14 @@ def train_bpe(input_path: str, vocab_size: int, special_tokens: List[str]) -> Tu
             print("No more pairs to merge.")
             break
         
-        # Find the most frequent pair, breaking ties lexicographically
-        best_pair = max(stats, key=lambda p: (stats[p], p))
+        # Find the most frequent pair, breaking ties by lexicographically greater pair
+        # According to the assignment PDF: "deterministically break ties in pair frequency 
+        # by preferring the lexicographically greater pair"
+        max_count = max(stats.values())
+        best_pair = max(
+            (p for p, count in stats.items() if count == max_count),
+            key=lambda p: (vocab[p[0]], vocab[p[1]])
+        )
         
         pair_bytes = (vocab[best_pair[0]], vocab[best_pair[1]])
         merges.append(pair_bytes)
