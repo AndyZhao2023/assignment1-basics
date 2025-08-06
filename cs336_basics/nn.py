@@ -66,3 +66,55 @@ class Embedding(nn.Module):
         """
         # Perform embedding lookup without using nn.Embedding or nn.functional.embedding
         return self.weight[token_ids]
+
+
+class RMSNorm(nn.Module):
+    """
+    Root Mean Square Layer Normalization.
+    
+    Normalizes the input by its root mean square and applies learned scaling.
+    Uses float32 for internal computations to prevent overflow.
+    
+    Args:
+        d_model: The dimension to normalize over (typically the model dimension)
+        eps: Small constant for numerical stability (default: 1e-5)
+    """
+    def __init__(self, d_model: int, eps: float = 1e-5):
+        super().__init__()
+        self.eps = eps
+        self.weight = nn.Parameter(torch.ones(d_model))
+    
+    def forward(self, x: Float[Tensor, "... d_model"]) -> Float[Tensor, "... d_model"]:
+        """
+        Apply RMS normalization to the input.
+        
+        Args:
+            x: Input tensor with shape (..., d_model)
+            
+        Returns:
+            Normalized tensor with the same shape as input
+        """
+        # Store original dtype
+        orig_dtype = x.dtype
+        
+        # Upcast to float32 to prevent overflow when squaring
+        x_float32 = x.to(torch.float32)
+        
+        # Compute RMS: sqrt(mean(x^2) + eps)
+        # Square the input
+        x_squared = x_float32.pow(2)
+        
+        # Compute mean across the last dimension (d_model), keeping dims for broadcasting
+        mean_squared = x_squared.mean(dim=-1, keepdim=True)
+        
+        # Add epsilon for numerical stability and take square root
+        rms = torch.sqrt(mean_squared + self.eps)
+        
+        # Normalize by RMS
+        x_normalized = x_float32 / rms
+        
+        # Cast back to original dtype
+        x_normalized = x_normalized.to(orig_dtype)
+        
+        # Apply learned scaling weights
+        return x_normalized * self.weight
