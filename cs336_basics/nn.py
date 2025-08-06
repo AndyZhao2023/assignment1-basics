@@ -4,6 +4,34 @@ from torch import Tensor
 from jaxtyping import Float, Int
 
 
+def silu(x: Float[Tensor, "..."]) -> Float[Tensor, "..."]:
+    """
+    SiLU (Sigmoid Linear Unit) activation function, also known as Swish.
+    
+    SiLU(x) = x * sigmoid(x)
+    
+    Uses float32 for intermediate computations to ensure numerical stability.
+    
+    Args:
+        x: Input tensor of arbitrary shape
+        
+    Returns:
+        Tensor of the same shape with SiLU applied element-wise
+    """
+    # Store original dtype
+    orig_dtype = x.dtype
+    
+    # Upcast to float32 for numerical stability
+    x_float32 = x.to(torch.float32)
+    
+    # Compute sigmoid and multiply with input
+    # SiLU(x) = x * sigmoid(x)
+    output = x_float32 * torch.sigmoid(x_float32)
+    
+    # Cast back to original dtype
+    return output.to(orig_dtype)
+
+
 class Linear(nn.Module):
     """
     A linear transformation module that performs y = xW^T (no bias).
@@ -118,3 +146,57 @@ class RMSNorm(nn.Module):
         
         # Apply learned scaling weights
         return x_normalized * self.weight
+
+
+class SwiGLU(nn.Module):
+    """
+    SwiGLU feed-forward network used in modern transformers like LLaMA.
+    
+    Implements: output = W2(SiLU(xW1^T) ⊙ xW3^T)
+    
+    Args:
+        d_model: Input and output dimension
+        d_ff: Hidden dimension (typically 8/3 * d_model, rounded to multiple of 64)
+    """
+    def __init__(self, d_model: int, d_ff: int = None):
+        super().__init__()
+        
+        # If d_ff not specified, compute it as 8/3 * d_model rounded to multiple of 64
+        if d_ff is None:
+            d_ff = int((8/3) * d_model)
+            # Round up to nearest multiple of 64 for hardware efficiency
+            d_ff = ((d_ff + 63) // 64) * 64
+        
+        # Three linear transformations (no bias, following modern conventions)
+        self.w1 = Linear(d_model, d_ff)  # Gate projection
+        self.w2 = Linear(d_ff, d_model)  # Down projection
+        self.w3 = Linear(d_model, d_ff)  # Up projection
+    
+    def forward(self, x: Float[Tensor, "... d_model"]) -> Float[Tensor, "... d_model"]:
+        """
+        Apply SwiGLU feed-forward network.
+        
+        Args:
+            x: Input tensor with shape (..., d_model)
+            
+        Returns:
+            Output tensor with same shape as input
+        """
+        # Store original dtype for final output
+        orig_dtype = x.dtype
+        
+        # Gate path: apply W1 and SiLU activation
+        gate = self.w1(x)
+        gate = silu(gate)
+        
+        # Up projection path: apply W3
+        up = self.w3(x)
+        
+        # Element-wise multiplication (gating)
+        # Both gate and up have shape (..., d_ff)
+        hidden = gate * up
+        
+        # Down projection: apply W2 to get back to d_model
+        output = self.w2(hidden)
+        
+        return output
