@@ -32,6 +32,45 @@ def silu(x: Float[Tensor, "..."]) -> Float[Tensor, "..."]:
     return output.to(orig_dtype)
 
 
+def softmax(x: Float[Tensor, "..."], dim: int) -> Float[Tensor, "..."]:
+    """
+    Compute softmax along a specified dimension with numerical stability.
+    
+    Uses the log-sum-exp trick to prevent numerical overflow:
+    softmax(x) = exp(x - max(x)) / sum(exp(x - max(x)))
+    
+    Args:
+        x: Input tensor of arbitrary shape
+        dim: Dimension along which to compute softmax
+        
+    Returns:
+        Tensor of same shape with softmax applied along specified dimension
+    """
+    # Store original dtype
+    orig_dtype = x.dtype
+    
+    # Upcast to float32 for numerical stability
+    x_float32 = x.to(torch.float32)
+    
+    # Subtract the maximum value along the specified dimension for numerical stability
+    # This prevents overflow in exp() while maintaining the same result
+    # keepdim=True ensures the max has the same number of dimensions for broadcasting
+    x_max = x_float32.max(dim=dim, keepdim=True).values
+    x_shifted = x_float32 - x_max
+    
+    # Compute exponentials of shifted values (all <= 0, so exp <= 1)
+    exp_x = torch.exp(x_shifted)
+    
+    # Sum exponentials along the specified dimension
+    sum_exp = exp_x.sum(dim=dim, keepdim=True)
+    
+    # Normalize to get probabilities
+    softmax_output = exp_x / sum_exp
+    
+    # Cast back to original dtype
+    return softmax_output.to(orig_dtype)
+
+
 class Linear(nn.Module):
     """
     A linear transformation module that performs y = xW^T (no bias).
