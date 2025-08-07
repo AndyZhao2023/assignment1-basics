@@ -200,3 +200,86 @@ class SwiGLU(nn.Module):
         output = self.w2(hidden)
         
         return output
+
+
+class RotaryPositionalEmbedding(nn.Module):
+    """
+    Rotary Position Embedding (RoPE) as described in RoFormer.
+    
+    Applies rotation to pairs of dimensions based on position, encoding
+    absolute position while maintaining relative position properties.
+    
+    Args:
+        theta: Base for the geometric progression of frequencies (typically 10000)
+        d_k: Dimension of query/key vectors (must be even)
+        max_seq_len: Maximum sequence length to precompute
+        device: Device to store precomputed buffers on
+    """
+    def __init__(self, theta: float, d_k: int, max_seq_len: int, device=None):
+        super().__init__()
+        assert d_k % 2 == 0, "d_k must be even for RoPE"
+        
+        self.d_k = d_k
+        self.theta = theta
+        self.max_seq_len = max_seq_len
+        
+        # Compute frequencies for each dimension pair
+        # θ_k = Θ^(-2k/d) for k = 0, 1, ..., d/2-1
+        # This matches θ_{i,k} = i × Θ^((2k-1)/d) when combined with positions
+        k = torch.arange(0, d_k, 2, dtype=torch.float32, device=device)
+        freqs = theta ** (-k / d_k)
+        
+        # Compute angles for all positions up to max_seq_len
+        # angles[i, k] = i × θ_k
+        positions = torch.arange(max_seq_len, dtype=torch.float32, device=device)
+        angles = positions.unsqueeze(1) * freqs.unsqueeze(0)  # (max_seq_len, d_k/2)
+        
+        # Precompute cos and sin values
+        # Using register_buffer with persistent=False as recommended
+        self.register_buffer('cos_cached', torch.cos(angles), persistent=False)
+        self.register_buffer('sin_cached', torch.sin(angles), persistent=False)
+    
+    def forward(self, x: Float[Tensor, "... seq_len d_k"], 
+                token_positions: Int[Tensor, "... seq_len"]) -> Float[Tensor, "... seq_len d_k"]:
+        """
+        Apply rotary position embedding to input tensor.
+        
+        Args:
+            x: Input tensor of shape (..., seq_len, d_k)
+            token_positions: Position indices of shape (..., seq_len)
+            
+        Returns:
+            Tensor of same shape as x with RoPE applied
+        """
+        *batch_dims, seq_len, d_k = x.shape
+        
+        # Ensure we're working with float32 for numerical stability
+        orig_dtype = x.dtype
+        x = x.to(torch.float32)
+        
+        # Get cos and sin values for the given positions
+        # Handle arbitrary batch dimensions by flattening and reshaping
+        flat_pos = token_positions.reshape(-1)
+        cos = self.cos_cached[flat_pos].reshape(*token_positions.shape, self.d_k // 2)
+        sin = self.sin_cached[flat_pos].reshape(*token_positions.shape, self.d_k // 2)
+        
+        # Reshape x to separate pairs of dimensions
+        # (..., seq_len, d_k) -> (..., seq_len, d_k/2, 2)
+        x_reshape = x.reshape(*batch_dims, seq_len, self.d_k // 2, 2)
+        
+        # Extract even and odd indices (the pairs)
+        x_even = x_reshape[..., 0]  # (..., seq_len, d_k/2)
+        x_odd = x_reshape[..., 1]   # (..., seq_len, d_k/2)
+        
+        # Apply rotation matrix to each pair:
+        # [cos  -sin] [x_even]   [x_even * cos - x_odd * sin]
+        # [sin   cos] [x_odd ] = [x_even * sin + x_odd * cos]
+        x_rotated_even = x_even * cos - x_odd * sin
+        x_rotated_odd = x_even * sin + x_odd * cos
+        
+        # Stack and reshape back to original shape
+        x_rotated = torch.stack([x_rotated_even, x_rotated_odd], dim=-1)
+        x_rotated = x_rotated.reshape(*batch_dims, seq_len, d_k)
+        
+        # Cast back to original dtype
+        return x_rotated.to(orig_dtype)
