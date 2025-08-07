@@ -71,6 +71,60 @@ def softmax(x: Float[Tensor, "..."], dim: int) -> Float[Tensor, "..."]:
     return softmax_output.to(orig_dtype)
 
 
+def scaled_dot_product_attention(
+    Q: Float[Tensor, "... queries d_k"],
+    K: Float[Tensor, "... keys d_k"], 
+    V: Float[Tensor, "... values d_v"],
+    mask: Float[Tensor, "... queries keys"] | None = None
+) -> Float[Tensor, "... queries d_v"]:
+    """
+    Compute scaled dot-product attention.
+    
+    Attention(Q, K, V) = softmax(QK^T / √d_k + mask) V
+    
+    Args:
+        Q: Query tensor of shape (..., queries, d_k)
+        K: Key tensor of shape (..., keys, d_k)
+        V: Value tensor of shape (..., values, d_v)
+        mask: Optional mask tensor of shape (..., queries, keys).
+              Should contain 0 for valid positions and -inf for masked positions.
+              
+    Returns:
+        Output tensor of shape (..., queries, d_v)
+    """
+    # Get the dimension of keys for scaling
+    d_k = Q.shape[-1]
+    
+    # Step 1: Compute attention scores QK^T
+    # Q: (..., queries, d_k), K: (..., keys, d_k)
+    # scores: (..., queries, keys)
+    scores = Q @ K.transpose(-2, -1)
+    
+    # Step 2: Scale by √d_k to prevent gradient vanishing
+    scale = 1.0 / (d_k ** 0.5)
+    scores = scores * scale
+    
+    # Step 3: Apply mask if provided
+    if mask is not None:
+        # Handle boolean mask: True means keep, False means mask out
+        if mask.dtype == torch.bool:
+            scores = scores.masked_fill(~mask, float('-inf'))
+        else:
+            # Assume mask contains 0 for valid positions and -inf for masked positions
+            scores = scores + mask
+    
+    # Step 4: Apply softmax to get attention weights
+    # softmax along the last dimension (keys)
+    attention_weights = softmax(scores, dim=-1)
+    
+    # Step 5: Apply attention weights to values
+    # attention_weights: (..., queries, keys), V: (..., keys, d_v)
+    # output: (..., queries, d_v)
+    output = attention_weights @ V
+    
+    return output
+
+
 class Linear(nn.Module):
     """
     A linear transformation module that performs y = xW^T (no bias).
