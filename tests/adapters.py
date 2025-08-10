@@ -155,7 +155,22 @@ def run_multihead_self_attention(
         Float[Tensor, " ... sequence_length d_out"]: Tensor with the output of running your optimized, batched multi-headed attention
         implementation with the given QKV projection weights and input features.
     """
-    raise NotImplementedError
+    from cs336_basics.nn import MultiHeadSelfAttention
+    
+    # Get sequence length for causal masking
+    seq_len = in_features.shape[-2]
+    
+    # Create multi-head attention module
+    mha = MultiHeadSelfAttention(d_model=d_model, num_heads=num_heads, max_seq_len=seq_len)
+    
+    # Set the weights from the provided parameters
+    mha.q_proj.weight.data = q_proj_weight
+    mha.k_proj.weight.data = k_proj_weight
+    mha.v_proj.weight.data = v_proj_weight
+    mha.output_proj.weight.data = o_proj_weight
+    
+    # Apply multi-head attention (without RoPE)
+    return mha(in_features)
 
 
 def run_multihead_self_attention_with_rope(
@@ -195,7 +210,41 @@ def run_multihead_self_attention_with_rope(
         Float[Tensor, " ... sequence_length d_out"]: Tensor with the output of running your optimized, batched multi-headed attention
         implementation with the given QKV projection weights and input features.
     """
-    raise NotImplementedError
+    from cs336_basics.nn import MultiHeadSelfAttention, RotaryPositionalEmbedding
+    
+    # Calculate head dimension
+    d_k = d_model // num_heads
+    
+    # Create RoPE module with head dimension
+    rope = RotaryPositionalEmbedding(
+        theta=theta, 
+        d_k=d_k, 
+        max_seq_len=max_seq_len,
+        device=in_features.device
+    )
+    
+    # Create multi-head attention module with RoPE
+    mha = MultiHeadSelfAttention(
+        d_model=d_model, 
+        num_heads=num_heads, 
+        max_seq_len=max_seq_len,
+        rope=rope
+    )
+    
+    # Set the weights from the provided parameters
+    mha.q_proj.weight.data = q_proj_weight
+    mha.k_proj.weight.data = k_proj_weight
+    mha.v_proj.weight.data = v_proj_weight
+    mha.output_proj.weight.data = o_proj_weight
+    
+    # If no token positions provided, create default sequential positions
+    if token_positions is None:
+        seq_len = in_features.shape[-2]
+        batch_dims = in_features.shape[:-2]
+        token_positions = torch.arange(seq_len, device=in_features.device).expand(*batch_dims, seq_len)
+    
+    # Apply multi-head attention with RoPE
+    return mha(in_features, token_positions)
 
 
 def run_rope(

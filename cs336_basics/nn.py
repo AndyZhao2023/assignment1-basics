@@ -376,3 +376,111 @@ class RotaryPositionalEmbedding(nn.Module):
         
         # Cast back to original dtype
         return x_rotated.to(orig_dtype)
+
+
+class MultiHeadSelfAttention(nn.Module):
+    """
+    Causal multi-head self-attention mechanism.
+    
+    Implements the scaled dot-product attention across multiple heads:
+    MultiHead(Q, K, V) = Concat(head_1, ..., head_h)W^O
+    where head_i = Attention(QW_i^Q, KW_i^K, VW_i^V)
+    
+    Args:
+        d_model: Model dimension (input and output dimension)
+        num_heads: Number of attention heads
+        max_seq_len: Maximum sequence length for causal mask
+        rope: Optional RoPE module for positional encoding
+    """
+    def __init__(self, d_model: int, num_heads: int, max_seq_len: int = None, rope: RotaryPositionalEmbedding = None):
+        super().__init__()
+        assert d_model % num_heads == 0, "d_model must be divisible by num_heads"
+        
+        self.d_model = d_model
+        self.num_heads = num_heads
+        self.d_k = d_model // num_heads  # Dimension per head
+        self.max_seq_len = max_seq_len
+        self.rope = rope
+        
+        # Linear projections for Q, K, V, and output
+        self.q_proj = Linear(d_model, d_model)
+        self.k_proj = Linear(d_model, d_model)
+        self.v_proj = Linear(d_model, d_model)
+        self.output_proj = Linear(d_model, d_model)
+        
+        # Register causal mask buffer if max_seq_len is provided
+        if max_seq_len is not None:
+            causal_mask = torch.triu(torch.ones(max_seq_len, max_seq_len), diagonal=1).bool()
+            self.register_buffer('causal_mask', causal_mask, persistent=False)
+        else:
+            self.causal_mask = None
+    
+    def forward(self, x: Float[Tensor, "... seq_len d_model"], 
+                token_positions: Int[Tensor, "... seq_len"] = None) -> Float[Tensor, "... seq_len d_model"]:
+        """
+        Apply multi-head self-attention to input tensor.
+        
+        Args:
+            x: Input tensor of shape (..., seq_len, d_model)
+            token_positions: Optional position indices for RoPE
+            
+        Returns:
+            Output tensor of same shape as input
+        """
+        *batch_dims, seq_len, d_model = x.shape
+        batch_size = 1
+        for dim in batch_dims:
+            batch_size *= dim
+            
+        # Linear projections
+        Q = self.q_proj(x)  # (..., seq_len, d_model)
+        K = self.k_proj(x)  # (..., seq_len, d_model)
+        V = self.v_proj(x)  # (..., seq_len, d_model)
+        
+        # Reshape for multi-head attention
+        # (..., seq_len, d_model) -> (..., seq_len, num_heads, d_k) -> (..., num_heads, seq_len, d_k)
+        Q = Q.view(*batch_dims, seq_len, self.num_heads, self.d_k).transpose(-3, -2)
+        K = K.view(*batch_dims, seq_len, self.num_heads, self.d_k).transpose(-3, -2)
+        V = V.view(*batch_dims, seq_len, self.num_heads, self.d_k).transpose(-3, -2)
+        
+        # Apply RoPE if provided
+        if self.rope is not None and token_positions is not None:
+            # Flatten batch and head dimensions for RoPE
+            # (..., num_heads, seq_len, d_k) -> (batch*num_heads, seq_len, d_k)
+            Q_flat = Q.reshape(-1, seq_len, self.d_k)
+            K_flat = K.reshape(-1, seq_len, self.d_k)
+            
+            # Repeat token_positions for each head
+            # (..., seq_len) -> (batch*num_heads, seq_len)
+            pos_flat = token_positions.unsqueeze(-2).expand(*batch_dims, self.num_heads, seq_len).reshape(-1, seq_len)
+            
+            # Apply RoPE
+            Q_flat = self.rope(Q_flat, pos_flat)
+            K_flat = self.rope(K_flat, pos_flat)
+            
+            # Reshape back to multi-head format
+            Q = Q_flat.reshape(*batch_dims, self.num_heads, seq_len, self.d_k)
+            K = K_flat.reshape(*batch_dims, self.num_heads, seq_len, self.d_k)
+        
+        # Create causal mask
+        # For causal attention, we want to mask out future positions (upper triangular)
+        # True = keep, False = mask out
+        if self.causal_mask is not None and seq_len <= self.max_seq_len:
+            # self.causal_mask has True for positions to mask out, so invert it
+            mask = ~self.causal_mask[:seq_len, :seq_len]
+        else:
+            # Create lower triangular mask (True = keep, False = mask out)
+            mask = torch.tril(torch.ones(seq_len, seq_len, device=x.device, dtype=torch.bool))
+        
+        # Apply scaled dot-product attention
+        # Q, K, V: (..., num_heads, seq_len, d_k)
+        attn_output = scaled_dot_product_attention(Q, K, V, mask)  # (..., num_heads, seq_len, d_k)
+        
+        # Reshape back to original format
+        # (..., num_heads, seq_len, d_k) -> (..., seq_len, num_heads, d_k) -> (..., seq_len, d_model)
+        attn_output = attn_output.transpose(-3, -2).contiguous().view(*batch_dims, seq_len, d_model)
+        
+        # Final output projection
+        output = self.output_proj(attn_output)
+        
+        return output
