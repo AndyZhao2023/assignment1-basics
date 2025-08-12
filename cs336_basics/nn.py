@@ -275,8 +275,6 @@ class SwiGLU(nn.Module):
         Returns:
             Output tensor with same shape as input
         """
-        # Store original dtype for final output
-        orig_dtype = x.dtype
         
         # Gate path: apply W1 and SiLU activation
         gate = self.w1(x)
@@ -544,3 +542,79 @@ class TransformerBlock(nn.Module):
         z = y + ffn_output
         
         return z
+
+
+class TransformerLM(nn.Module):
+    """
+    Transformer Language Model that combines token embeddings, transformer blocks,
+    and an output projection for next-token prediction.
+    
+    Args:
+        vocab_size: Size of the vocabulary
+        context_length: Maximum sequence length
+        d_model: Model dimension
+        num_layers: Number of transformer blocks
+        num_heads: Number of attention heads
+        d_ff: Feed-forward hidden dimension
+        rope_theta: RoPE theta parameter
+    """
+    def __init__(self, vocab_size: int, context_length: int, d_model: int, 
+                 num_layers: int, num_heads: int, d_ff: int, rope_theta: float = 10000.0):
+        super().__init__()
+        
+        self.vocab_size = vocab_size
+        self.context_length = context_length
+        self.d_model = d_model
+        self.num_layers = num_layers
+        self.num_heads = num_heads
+        self.d_ff = d_ff
+        self.rope_theta = rope_theta
+        
+        # Token embeddings
+        self.token_embeddings = Embedding(vocab_size, d_model)
+        
+        # Create shared RoPE instance
+        d_k = d_model // num_heads
+        self.rope = RotaryPositionalEmbedding(rope_theta, d_k, context_length)
+        
+        # Stack of transformer blocks
+        self.layers = nn.ModuleList([
+            TransformerBlock(d_model, num_heads, d_ff, context_length, self.rope)
+            for _ in range(num_layers)
+        ])
+        
+        # Final layer normalization
+        self.ln_final = RMSNorm(d_model)
+        
+        # Language model head (output projection)
+        self.lm_head = Linear(d_model, vocab_size)
+    
+    def forward(self, token_ids: Int[Tensor, "batch_size sequence_length"]) -> Float[Tensor, "batch_size sequence_length vocab_size"]:
+        """
+        Forward pass of the Transformer Language Model.
+        
+        Args:
+            token_ids: Input token IDs of shape (batch_size, sequence_length)
+            
+        Returns:
+            Logits tensor of shape (batch_size, sequence_length, vocab_size)
+        """
+        batch_size, seq_len = token_ids.shape
+        
+        # Convert token IDs to embeddings
+        x = self.token_embeddings(token_ids)  # (batch_size, seq_len, d_model)
+        
+        # Generate token positions for RoPE
+        token_positions = torch.arange(seq_len, device=token_ids.device).expand(batch_size, seq_len)
+        
+        # Pass through transformer blocks
+        for layer in self.layers:
+            x = layer(x, token_positions)
+        
+        # Apply final layer normalization
+        x = self.ln_final(x)
+        
+        # Project to vocabulary size
+        logits = self.lm_head(x)  # (batch_size, seq_len, vocab_size)
+        
+        return logits

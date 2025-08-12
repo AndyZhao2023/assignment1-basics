@@ -467,7 +467,53 @@ def run_transformer_lm(
         Float[Tensor, "batch_size sequence_length vocab_size"]: Tensor with the predicted unnormalized
         next-word distribution for each token.
     """
-    raise NotImplementedError
+    from cs336_basics.nn import TransformerLM
+    
+    # Create TransformerLM instance
+    model = TransformerLM(
+        vocab_size=vocab_size,
+        context_length=context_length,
+        d_model=d_model,
+        num_layers=num_layers,
+        num_heads=num_heads,
+        d_ff=d_ff,
+        rope_theta=rope_theta
+    )
+    
+    # Set token embeddings weights
+    model.token_embeddings.weight.data = weights["token_embeddings.weight"]
+    
+    # Set weights for each transformer layer
+    for layer_idx in range(num_layers):
+        layer = model.layers[layer_idx]
+        
+        # Set attention weights
+        layer.attn.q_proj.weight.data = weights[f"layers.{layer_idx}.attn.q_proj.weight"]
+        layer.attn.k_proj.weight.data = weights[f"layers.{layer_idx}.attn.k_proj.weight"]
+        layer.attn.v_proj.weight.data = weights[f"layers.{layer_idx}.attn.v_proj.weight"]
+        layer.attn.output_proj.weight.data = weights[f"layers.{layer_idx}.attn.output_proj.weight"]
+        
+        # Set layer norm weights
+        layer.ln1.weight.data = weights[f"layers.{layer_idx}.ln1.weight"]
+        layer.ln2.weight.data = weights[f"layers.{layer_idx}.ln2.weight"]
+        
+        # Set feed-forward weights
+        layer.ffn.w1.weight.data = weights[f"layers.{layer_idx}.ffn.w1.weight"]
+        layer.ffn.w2.weight.data = weights[f"layers.{layer_idx}.ffn.w2.weight"]
+        layer.ffn.w3.weight.data = weights[f"layers.{layer_idx}.ffn.w3.weight"]
+    
+    # Set final layer norm weights
+    model.ln_final.weight.data = weights["ln_final.weight"]
+    
+    # Set language model head weights
+    model.lm_head.weight.data = weights["lm_head.weight"]
+    
+    # Set to eval mode and run forward pass
+    model.eval()
+    with torch.no_grad():
+        output = model(in_indices)
+    
+    return output
 
 
 def run_rmsnorm(
