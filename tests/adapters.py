@@ -350,7 +350,42 @@ def run_transformer_block(
         Float[Tensor, "batch sequence_length d_model"] Tensor with the output of
         running the Transformer block on the input features while using RoPE.
     """
-    raise NotImplementedError
+    from cs336_basics.nn import TransformerBlock, RotaryPositionalEmbedding
+    
+    # Create RoPE instance
+    d_k = d_model // num_heads
+    rope = RotaryPositionalEmbedding(theta, d_k, max_seq_len, device=in_features.device)
+    
+    # Create TransformerBlock instance
+    block = TransformerBlock(d_model, num_heads, d_ff, max_seq_len, rope)
+    
+    # Set weights from the state dict
+    block.ln1.weight.data = weights["ln1.weight"]
+    block.ln2.weight.data = weights["ln2.weight"]
+    
+    # Set attention weights
+    block.attn.q_proj.weight.data = weights["attn.q_proj.weight"]
+    block.attn.k_proj.weight.data = weights["attn.k_proj.weight"]  
+    block.attn.v_proj.weight.data = weights["attn.v_proj.weight"]
+    block.attn.output_proj.weight.data = weights["attn.output_proj.weight"]
+    
+    # Set feed-forward weights
+    block.ffn.w1.weight.data = weights["ffn.w1.weight"]
+    block.ffn.w2.weight.data = weights["ffn.w2.weight"]
+    block.ffn.w3.weight.data = weights["ffn.w3.weight"]
+    
+    # Set eval mode to disable any training-specific behavior
+    block.eval()
+    
+    # Generate token positions for RoPE
+    batch_size, seq_len, _ = in_features.shape
+    token_positions = torch.arange(seq_len, device=in_features.device).expand(batch_size, seq_len)
+    
+    # Forward pass
+    with torch.no_grad():
+        output = block(in_features, token_positions)
+    
+    return output
 
 
 def run_transformer_lm(

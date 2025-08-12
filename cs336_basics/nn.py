@@ -484,3 +484,63 @@ class MultiHeadSelfAttention(nn.Module):
         output = self.output_proj(attn_output)
         
         return output
+
+
+class TransformerBlock(nn.Module):
+    """
+    Pre-norm Transformer block with multi-head self-attention and feed-forward network.
+    
+    Implements the pre-norm architecture:
+    y = x + MultiHeadSelfAttention(RMSNorm(x))
+    z = y + FFN(RMSNorm(y))
+    
+    Args:
+        d_model: Model dimension (input and output dimension)
+        num_heads: Number of attention heads
+        d_ff: Feed-forward hidden dimension
+        max_seq_len: Maximum sequence length for causal mask and RoPE
+        rope: Optional RoPE module for positional encoding
+    """
+    def __init__(self, d_model: int, num_heads: int, d_ff: int, max_seq_len: int = None, rope: RotaryPositionalEmbedding = None):
+        super().__init__()
+        
+        self.d_model = d_model
+        self.num_heads = num_heads
+        self.d_ff = d_ff
+        self.max_seq_len = max_seq_len
+        
+        # Layer normalization modules
+        self.ln1 = RMSNorm(d_model)
+        self.ln2 = RMSNorm(d_model)
+        
+        # Multi-head self-attention
+        self.attn = MultiHeadSelfAttention(d_model, num_heads, max_seq_len, rope)
+        
+        # Feed-forward network
+        self.ffn = SwiGLU(d_model, d_ff)
+    
+    def forward(self, x: Float[Tensor, "... seq_len d_model"], 
+                token_positions: Int[Tensor, "... seq_len"] = None) -> Float[Tensor, "... seq_len d_model"]:
+        """
+        Apply Transformer block to input tensor.
+        
+        Args:
+            x: Input tensor of shape (..., seq_len, d_model)
+            token_positions: Optional position indices for RoPE
+            
+        Returns:
+            Output tensor of same shape as input
+        """
+        # First sub-layer: multi-head self-attention with residual connection
+        # y = x + MultiHeadSelfAttention(RMSNorm(x))
+        attn_input = self.ln1(x)
+        attn_output = self.attn(attn_input, token_positions)
+        y = x + attn_output
+        
+        # Second sub-layer: feed-forward network with residual connection
+        # z = y + FFN(RMSNorm(y))
+        ffn_input = self.ln2(y)
+        ffn_output = self.ffn(ffn_input)
+        z = y + ffn_output
+        
+        return z
