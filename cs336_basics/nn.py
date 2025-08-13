@@ -71,6 +71,67 @@ def softmax(x: Float[Tensor, "..."], dim: int) -> Float[Tensor, "..."]:
     return softmax_output.to(orig_dtype)
 
 
+def cross_entropy(inputs: Float[Tensor, "... vocab_size"], 
+                  targets: Int[Tensor, "..."]) -> Float[Tensor, ""]:
+    """
+    Compute cross-entropy loss with numerical stability.
+    
+    Implements the formula: ℓi = − log softmax(oi)[xi+1]
+    Then averages across all batch examples.
+    
+    Uses the log-sum-exp trick for numerical stability:
+    log(softmax(x)) = x - log_sum_exp(x)
+    
+    Args:
+        inputs: Unnormalized logits of shape (..., vocab_size) where ... represents 
+                any number of batch dimensions
+        targets: True class indices of shape (...) with values in [0, vocab_size-1]
+        
+    Returns:
+        Scalar tensor with average cross-entropy loss across all examples
+    """
+    # Store original dtype
+    orig_dtype = inputs.dtype
+    
+    # Upcast to float32 for numerical stability
+    inputs_float32 = inputs.to(torch.float32)
+    
+    # Get shape information
+    original_shape = inputs_float32.shape
+    vocab_size = original_shape[-1]
+    batch_dims = original_shape[:-1]
+    
+    # Calculate total number of examples across all batch dimensions
+    total_batch_size = inputs_float32.numel() // vocab_size
+    
+    # Flatten all batch dimensions while keeping vocab_size as last dimension
+    # (..., vocab_size) -> (total_batch_size, vocab_size)
+    inputs_flat = inputs_float32.view(total_batch_size, vocab_size)
+    
+    # Flatten targets to match
+    # (...) -> (total_batch_size,)
+    targets_flat = targets.view(total_batch_size)
+    
+    # Extract logits for the correct classes using advanced indexing
+    # inputs_flat[i, targets_flat[i]] gives the logit for the true class of example i
+    correct_class_logits = inputs_flat[torch.arange(total_batch_size), targets_flat]
+    
+    # Compute log_sum_exp for each example (denominator of log softmax)
+    # Subtract max for numerical stability (log-sum-exp trick)
+    max_logits = inputs_flat.max(dim=1, keepdim=True).values
+    shifted_logits = inputs_flat - max_logits
+    log_sum_exp = torch.log(torch.exp(shifted_logits).sum(dim=1)) + max_logits.squeeze(1)
+    
+    # Cross-entropy loss: ℓi = − log softmax(oi)[xi+1] = -(oi[xi+1] - log_sum_exp(oi))
+    individual_losses = -(correct_class_logits - log_sum_exp)
+    
+    # Average across all examples
+    avg_loss = individual_losses.mean()
+    
+    # Cast back to original dtype
+    return avg_loss.to(orig_dtype)
+
+
 def scaled_dot_product_attention(
     Q: Float[Tensor, "... queries d_k"],
     K: Float[Tensor, "... keys d_k"], 
