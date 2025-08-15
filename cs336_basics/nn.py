@@ -4,6 +4,8 @@ from torch import Tensor
 from jaxtyping import Float, Int
 from collections.abc import Iterable
 import numpy.typing as npt
+import os
+from typing import BinaryIO, IO
 
 
 def silu(x: Float[Tensor, "..."]) -> Float[Tensor, "..."]:
@@ -759,3 +761,58 @@ def get_batch(dataset: npt.NDArray, batch_size: int, context_length: int, device
     labels = labels.to(device)
     
     return inputs, labels
+
+
+def save_checkpoint(
+    model: torch.nn.Module,
+    optimizer: torch.optim.Optimizer,
+    iteration: int,
+    out: str | os.PathLike | BinaryIO | IO[bytes],
+) -> None:
+    """
+    Save model, optimizer, and iteration state to a checkpoint file.
+    
+    Args:
+        model: PyTorch model to serialize
+        optimizer: PyTorch optimizer to serialize
+        iteration: Current training iteration number
+        out: File path or file-like object to save checkpoint to
+    """
+    # Create checkpoint dictionary with all required state
+    checkpoint = {
+        'model_state_dict': model.state_dict(),
+        'optimizer_state_dict': optimizer.state_dict(),
+        'iteration': iteration
+    }
+    
+    # Save using torch.save, which handles both file paths and file-like objects
+    torch.save(checkpoint, out)
+
+
+def load_checkpoint(
+    src: str | os.PathLike | BinaryIO | IO[bytes],
+    model: torch.nn.Module,
+    optimizer: torch.optim.Optimizer,
+) -> int:
+    """
+    Load model and optimizer state from a checkpoint file.
+    
+    Args:
+        src: File path or file-like object to load checkpoint from
+        model: PyTorch model to load state into
+        optimizer: PyTorch optimizer to load state into
+        
+    Returns:
+        The iteration number from the checkpoint
+    """
+    # Load checkpoint dictionary
+    checkpoint = torch.load(src, map_location='cpu')
+    
+    # Restore model state
+    model.load_state_dict(checkpoint['model_state_dict'])
+    
+    # Restore optimizer state
+    optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+    
+    # Return the saved iteration number
+    return checkpoint['iteration']
