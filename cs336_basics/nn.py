@@ -816,3 +816,155 @@ def load_checkpoint(
     
     # Return the saved iteration number
     return checkpoint['iteration']
+
+
+def softmax_with_temperature(logits: Float[Tensor, "... vocab_size"], 
+                            temperature: float = 1.0, 
+                            dim: int = -1) -> Float[Tensor, "... vocab_size"]:
+    """
+    Compute softmax with temperature scaling for text generation.
+    
+    Temperature scaling formula: softmax(v, τ)i = exp(vi/τ) / Σexp(vj/τ)
+    
+    Args:
+        logits: Input logits of shape (..., vocab_size)
+        temperature: Temperature parameter τ. Higher values make distribution more uniform,
+                    lower values make it more peaked. Must be > 0.
+        dim: Dimension along which to compute softmax
+        
+    Returns:
+        Temperature-scaled probabilities of same shape as input
+    """
+    if temperature <= 0:
+        raise ValueError(f"Temperature must be positive, got {temperature}")
+    
+    # Apply temperature scaling by dividing logits by temperature
+    scaled_logits = logits / temperature
+    
+    # Apply standard softmax to scaled logits
+    return softmax(scaled_logits, dim=dim)
+
+
+def top_p_sampling(probs: Float[Tensor, "vocab_size"], p: float = 0.9) -> Int[Tensor, ""]:
+    """
+    Sample from top-p (nucleus) sampling distribution.
+    
+    Top-p sampling keeps only the smallest set of tokens whose cumulative 
+    probability mass is at least p, then samples from this truncated distribution.
+    
+    Args:
+        probs: Probability distribution over vocabulary of shape (vocab_size,)
+        p: Cumulative probability threshold. Must be in (0, 1]
+        
+    Returns:
+        Sampled token index
+    """
+    if not 0 < p <= 1:
+        raise ValueError(f"p must be in (0, 1], got {p}")
+    
+    # Sort probabilities in descending order and get sorted indices
+    sorted_probs, sorted_indices = torch.sort(probs, descending=True)
+    
+    # Compute cumulative probabilities
+    cumulative_probs = torch.cumsum(sorted_probs, dim=0)
+    
+    # Find where cumulative probability exceeds p
+    # Keep tokens up to and including the first one that makes cumsum >= p
+    keep_mask = cumulative_probs <= p
+    
+    # Ensure we keep at least one token (the most probable one)
+    if not keep_mask.any():
+        keep_mask[0] = True
+    else:
+        # Include one more token after the threshold to ensure we have something to sample from
+        last_keep_idx = keep_mask.nonzero()[-1].item()
+        if last_keep_idx < len(keep_mask) - 1:
+            keep_mask[last_keep_idx + 1] = True
+    
+    # Zero out probabilities of tokens we don't want to keep
+    filtered_probs = sorted_probs.clone()
+    filtered_probs[~keep_mask] = 0.0
+    
+    # Renormalize the remaining probabilities
+    filtered_probs = filtered_probs / filtered_probs.sum()
+    
+    # Sample from the filtered distribution
+    sampled_idx = torch.multinomial(filtered_probs, num_samples=1).item()
+    
+    # Convert back to original vocabulary index
+    return sorted_indices[sampled_idx]
+
+
+def generate_text(model: 'TransformerLM', 
+                  tokenizer,
+                  prompt: str,
+                  max_tokens: int = 100,
+                  temperature: float = 1.0,
+                  top_p: float = 0.9,
+                  device: str = 'cpu') -> str:
+    """
+    Generate text using a transformer language model with temperature scaling and top-p sampling.
+    
+    Args:
+        model: Trained TransformerLM model
+        tokenizer: Tokenizer with encode/decode methods
+        prompt: Input prompt string
+        max_tokens: Maximum number of tokens to generate
+        temperature: Temperature for scaling logits (higher = more random)
+        top_p: Nucleus sampling parameter (keep tokens with cumulative prob <= top_p)
+        device: Device to run generation on
+        
+    Returns:
+        Generated text string including the original prompt
+    """
+    model.eval()
+    
+    # Encode the prompt
+    input_ids = tokenizer.encode(prompt)
+    input_tensor = torch.tensor(input_ids, dtype=torch.long, device=device).unsqueeze(0)
+    
+    # Get end-of-text token ID
+    endoftext_token = None
+    try:
+        if hasattr(tokenizer, 'encode'):
+            endoftext_ids = tokenizer.encode("<|endoftext|>")
+            if endoftext_ids:
+                endoftext_token = endoftext_ids[0]
+    except:
+        # If encoding fails, continue without end-of-text detection
+        pass
+    
+    generated_tokens = input_ids.copy()
+    
+    with torch.no_grad():
+        for _ in range(max_tokens):
+            # Get model predictions for current sequence
+            # Only use the last context_length tokens if sequence is too long
+            current_length = input_tensor.shape[1]
+            if current_length > model.context_length:
+                input_tensor = input_tensor[:, -model.context_length:]
+            
+            logits = model(input_tensor)  # Shape: (1, seq_len, vocab_size)
+            
+            # Get logits for the last token (next token prediction)
+            next_token_logits = logits[0, -1, :]  # Shape: (vocab_size,)
+            
+            # Apply temperature scaling
+            probs = softmax_with_temperature(next_token_logits, temperature=temperature)
+            
+            # Sample using top-p sampling
+            next_token = top_p_sampling(probs, p=top_p)
+            
+            # Add the new token to our sequence
+            generated_tokens.append(next_token.item())
+            
+            # Check if we generated the end-of-text token
+            if endoftext_token is not None and next_token.item() == endoftext_token:
+                break
+            
+            # Update input tensor for next iteration
+            next_token_tensor = next_token.unsqueeze(0).unsqueeze(0)  # Shape: (1, 1)
+            input_tensor = torch.cat([input_tensor, next_token_tensor], dim=1)
+    
+    # Decode the generated tokens back to text
+    return tokenizer.decode(generated_tokens)

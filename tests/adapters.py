@@ -768,3 +768,77 @@ def run_train_bpe(
     """
     from cs336_basics.tokenizer import train_bpe
     return train_bpe(input_path, vocab_size, special_tokens, verbose=False)
+
+
+def run_generate_text(
+    model: Any,
+    tokenizer: Any,
+    prompt: str,
+    max_tokens: int = 100,
+    temperature: float = 1.0,
+    top_p: float = 0.9,
+    device: str = 'cpu'
+) -> str:
+    """
+    Generate text using a transformer language model with temperature scaling and top-p sampling.
+    
+    This function implements the "Decoding (3 points)" problem from Section 6 "Generating text".
+    
+    Args:
+        model: Trained TransformerLM model
+        tokenizer: Tokenizer with encode/decode methods
+        prompt: Input prompt string
+        max_tokens: Maximum number of tokens to generate
+        temperature: Temperature for scaling logits (higher = more random)
+        top_p: Nucleus sampling parameter (keep tokens with cumulative prob <= top_p)
+        device: Device to run generation on
+        
+    Returns:
+        Generated text string including the original prompt
+    """
+    from cs336_basics.nn import generate_text
+    return generate_text(model, tokenizer, prompt, max_tokens, temperature, top_p, device)
+
+
+def run_softmax_with_temperature(
+    logits: Float[Tensor, "... vocab_size"], 
+    temperature: float = 1.0, 
+    dim: int = -1
+) -> Float[Tensor, "... vocab_size"]:
+    """
+    Compute softmax with temperature scaling for text generation.
+    
+    Implements the formula: softmax(v, τ)i = exp(vi/τ) / Σexp(vj/τ)
+    
+    Args:
+        logits: Input logits of shape (..., vocab_size)
+        temperature: Temperature parameter τ. Higher values make distribution more uniform,
+                    lower values make it more peaked. Must be > 0.
+        dim: Dimension along which to compute softmax
+        
+    Returns:
+        Temperature-scaled probabilities of same shape as input
+    """
+    from cs336_basics.nn import softmax_with_temperature
+    return softmax_with_temperature(logits, temperature, dim)
+
+
+def run_top_p_sampling(
+    probs: Float[Tensor, "vocab_size"], 
+    p: float = 0.9
+) -> Int[Tensor, ""]:
+    """
+    Sample from top-p (nucleus) sampling distribution.
+    
+    Top-p sampling keeps only the smallest set of tokens whose cumulative 
+    probability mass is at least p, then samples from this truncated distribution.
+    
+    Args:
+        probs: Probability distribution over vocabulary of shape (vocab_size,)
+        p: Cumulative probability threshold. Must be in (0, 1]
+        
+    Returns:
+        Sampled token index
+    """
+    from cs336_basics.nn import top_p_sampling
+    return top_p_sampling(probs, p)
