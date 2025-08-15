@@ -3,6 +3,7 @@ import torch.nn as nn
 from torch import Tensor
 from jaxtyping import Float, Int
 from collections.abc import Iterable
+import numpy.typing as npt
 
 
 def silu(x: Float[Tensor, "..."]) -> Float[Tensor, "..."]:
@@ -716,3 +717,45 @@ def gradient_clipping(parameters: Iterable[torch.nn.Parameter], max_l2_norm: flo
     if clip_coef < 1.0:
         for grad in gradients:
             grad.data.mul_(clip_coef)
+
+
+def get_batch(dataset: npt.NDArray, batch_size: int, context_length: int, device: str) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Sample language modeling input sequences and labels from a dataset.
+    
+    Args:
+        dataset: 1D numpy array of integer token IDs
+        batch_size: Number of sequences to sample
+        context_length: Length of each sequence
+        device: PyTorch device string (e.g., 'cpu' or 'cuda:0')
+        
+    Returns:
+        Tuple of (inputs, labels) where:
+        - inputs: shape (batch_size, context_length) 
+        - labels: shape (batch_size, context_length), shifted by 1 from inputs
+    """
+    # Validate that dataset is long enough
+    if len(dataset) < context_length + 1:
+        raise ValueError(f"Dataset length {len(dataset)} is too short for context_length {context_length}")
+    
+    # Calculate valid range for starting indices
+    max_start_idx = len(dataset) - context_length
+    
+    # Sample random starting indices
+    start_indices = torch.randint(0, max_start_idx, (batch_size,))
+    
+    # Extract sequences for inputs and labels
+    inputs = torch.zeros(batch_size, context_length, dtype=torch.long)
+    labels = torch.zeros(batch_size, context_length, dtype=torch.long)
+    
+    for i, start_idx in enumerate(start_indices):
+        # Input sequence: [start_idx, start_idx+1, ..., start_idx+context_length-1]
+        inputs[i] = torch.from_numpy(dataset[start_idx:start_idx + context_length])
+        # Label sequence: [start_idx+1, start_idx+2, ..., start_idx+context_length] 
+        labels[i] = torch.from_numpy(dataset[start_idx + 1:start_idx + context_length + 1])
+    
+    # Move to specified device
+    inputs = inputs.to(device)
+    labels = labels.to(device)
+    
+    return inputs, labels
