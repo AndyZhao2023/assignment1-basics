@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 from torch import Tensor
 from jaxtyping import Float, Int
+from collections.abc import Iterable
 
 
 def silu(x: Float[Tensor, "..."]) -> Float[Tensor, "..."]:
@@ -679,3 +680,39 @@ class TransformerLM(nn.Module):
         logits = self.lm_head(x)  # (batch_size, seq_len, vocab_size)
         
         return logits
+
+
+def gradient_clipping(parameters: Iterable[torch.nn.Parameter], max_l2_norm: float) -> None:
+    """
+    Clip the gradients of a set of parameters to have L2 norm at most max_l2_norm.
+    
+    Args:
+        parameters: Collection of trainable parameters
+        max_l2_norm: Maximum L2 norm for the combined gradients
+        
+    The gradients are modified in-place.
+    """
+    # Collect all gradients that exist (skip frozen parameters)
+    gradients = []
+    for param in parameters:
+        if param.grad is not None:
+            gradients.append(param.grad)
+    
+    # If no gradients, nothing to clip
+    if not gradients:
+        return
+    
+    # Compute the total L2 norm of all gradients combined
+    # Method 1: Compute individual norms, then combine (matches PyTorch's approach)
+    total_norm = 0.0
+    for grad in gradients:
+        total_norm += grad.data.norm(2).item() ** 2
+    total_norm = total_norm ** 0.5
+    
+    # Calculate clipping coefficient
+    clip_coef = max_l2_norm / (total_norm + 1e-6)
+
+    # Only clip if the norm exceeds the maximum
+    if clip_coef < 1.0:
+        for grad in gradients:
+            grad.data.mul_(clip_coef)
