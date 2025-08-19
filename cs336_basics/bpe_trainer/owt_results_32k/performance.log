@@ -1,0 +1,14 @@
+=== BPE Training Performance Report ===
+File size: 11.9 GB
+Final vocabulary size: 32000
+Number of merges: 31743
+
+=== Timing Breakdown ===
+Pre-tokenization: 557.84s (5.5%)
+Token conversion: 5.54s (0.1%)
+BPE merging: 9550.58s (94.4%)
+Total time: 10116.03s
+
+=== Performance Metrics ===
+Pre-tokenization throughput: 76.9 GB/hour
+BPE merge rate: 3.3 merges/second

@@ -1,0 +1,22 @@
+[package]
+name = "bpe_trainer"
+version = "1.0.0"
+edition = "2021"
+
+[[bin]]
+name = "bpe_trainer"
+path = "src/main.rs"
+
+[[bin]]
+name = "bpe_trainer_v2"
+path = "src/main_optimized.rs"
+
+[dependencies]
+clap = { version = "4.0", features = ["derive"] }
+onig = "6.4"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+log = "0.4"
+env_logger = "0.10"
+rayon = "1.10"
+indexmap = "2.0"
