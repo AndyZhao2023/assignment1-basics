@@ -19,6 +19,8 @@ dependencies = [
     "tqdm>=4.67.1",
     "wandb>=0.19.7",
     "ty>=0.0.1a16",
+    "rust-tokenizer",
+    "maturin>=1.9.3",
 ]
 
 [build-system]
@@ -28,6 +30,14 @@ build-backend = "uv_build"
 [tool.uv.build-backend]
 module-name = "cs336_basics"
 module-root = ""
+
+[tool.uv.workspace]
+members = [
+    "cs336_basics/tokenizers/bpe_pymodule",
+]
+
+[tool.uv.sources]
+rust-tokenizer = { workspace = true }
 
 [tool.uv]
 package = true
