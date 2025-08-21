@@ -21,13 +21,42 @@ This is CS336 Spring 2025 Assignment 1: Basics - a Stanford course assignment im
 - Check code style: `uv run ruff check .`
 - Fix code style issues: `uv run ruff check . --fix`
 
+## Project Structure
+
+### Directory Organization
+
+```
+.
+├── cs336_basics/          # Core implementation code
+│   ├── nn.py             # Neural network components
+│   ├── optimizer.py      # AdamW optimizer implementation
+│   └── tokenizers/       # Tokenizer implementations
+│       ├── tokenizer.py           # Pure Python BPE tokenizer
+│       ├── bpe_cli/               # Standalone Rust CLI tool
+│       └── bpe_pymodule/          # Python extension with Rust acceleration
+├── training/             # Model training scripts
+├── demos/                # Demonstration and example scripts
+├── analysis/             # Analysis and profiling tools
+├── artifacts/            # Training outputs
+│   ├── checkpoints/      # Model checkpoints
+│   └── vocabularies/     # Trained BPE vocabularies
+├── docs/                 # Documentation
+│   ├── implementation/   # Implementation guides
+│   └── technical/        # Technical explanations
+├── data/                 # Training datasets
+├── results/              # Analysis results
+└── tests/                # Test suite
+```
+
 ## Code Architecture
 
 ### Core Implementation Structure
 
 The main implementation is split across:
 - `cs336_basics/nn.py`: Neural network components (attention, layers, activations)
-- `cs336_basics/tokenizer.py`: BPE tokenizer implementation
+- `cs336_basics/optimizer.py`: AdamW optimizer and learning rate scheduling
+- `cs336_basics/tokenizers/tokenizer.py`: Pure Python BPE tokenizer implementation
+- `cs336_basics/tokenizers/bpe_pymodule/`: Rust-accelerated tokenizer (optional)
 - `tests/adapters.py`: Bridge functions connecting implementations to tests
 
 ### Key Components to Implement
@@ -40,17 +69,17 @@ The main implementation is split across:
    - Multi-head self-attention (with and without RoPE)
    - Transformer blocks and full language model
 
-2. **Tokenizer** (`cs336_basics/tokenizer.py`):
+2. **Tokenizer** (`cs336_basics/tokenizers/tokenizer.py`):
    - BPE tokenizer with special token support
    - Training algorithm for BPE
 
 3. **Training Utilities**:
-   - Cross-entropy loss
-   - Gradient clipping
-   - AdamW optimizer
-   - Cosine learning rate schedule
-   - Checkpointing (save/load)
-   - Data loading (get_batch)
+   - Cross-entropy loss (`cs336_basics/nn.py`)
+   - Gradient clipping (`cs336_basics/nn.py`)
+   - AdamW optimizer (`cs336_basics/optimizer.py`)
+   - Cosine learning rate schedule (`cs336_basics/optimizer.py`)
+   - Checkpointing - save/load (`cs336_basics/nn.py`)
+   - Data loading - get_batch (`cs336_basics/nn.py`)
 
 ### Test Adapters Pattern
 
