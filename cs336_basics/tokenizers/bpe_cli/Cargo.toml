@@ -5,11 +5,11 @@ edition = "2021"
 
 [[bin]]
 name = "bpe_trainer"
-path = "src/main.rs"
+path = "src/main_trainer.rs"
 
 [[bin]]
-name = "bpe_trainer_v2"
-path = "src/main_optimized.rs"
+name = "bpe_tokenizer"
+path = "src/main_tokenizer.rs"
 
 [dependencies]
 clap = { version = "4.0", features = ["derive"] }
@@ -20,3 +20,7 @@ log = "0.4"
 env_logger = "0.10"
 rayon = "1.10"
 indexmap = "2.0"
+fxhash = "0.2"
+smallvec = "1.11"
+lru = "0.12"
+regex = "1.10"

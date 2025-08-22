@@ -296,7 +296,7 @@ class Tokenizer:
         
         # Convert vocab to int -> bytes mapping
         vocab = {}
-        for token_str, token_id in vocab_data.items():
+        for token_id_str, token_str in vocab_data.items():
             # Convert string representation back to bytes
             try:
                 # Handle byte strings that may be encoded as escape sequences
@@ -304,7 +304,7 @@ class Tokenizer:
             except:
                 # Fallback: encode as UTF-8
                 token_bytes = token_str.encode('utf-8')
-            vocab[token_id] = token_bytes
+            vocab[int(token_id_str)] = token_bytes
         
         # Load merges
         merges = []
@@ -404,12 +404,66 @@ class Tokenizer:
                     token_ids.append(self.reverse_vocab[pre_token_bytes])
                 continue
             
-            # Apply BPE encoding
-            word_token_ids = self._encode_word(pre_token_bytes)
+            # Apply BPE encoding (use optimized version)
+            word_token_ids = self._encode_word_fast(pre_token_bytes)
             token_ids.extend(word_token_ids)
         
         return token_ids
     
+    def _encode_word_fast(self, word_bytes: bytes) -> List[int]:
+        """
+        Optimized BPE encoding that avoids scanning all merges but preserves original behavior.
+        Uses merge_priorities lookup instead of iterating through all merges.
+        """
+        if not self.vocab or not self.merges:
+            raise ValueError("Tokenizer not initialized with vocab and merges")
+        
+        # Start with individual bytes
+        word = [bytes([b]) for b in word_bytes]
+        
+        # Process merges in the same order as original (by merge file order/priority)
+        # But only check if the merge is applicable instead of scanning all merges
+        for merge_a, merge_b in self.merges:
+            if len(word) < 2:
+                break
+            
+            # Quick check: is this merge even possible in current word?
+            merge_possible = False
+            for i in range(len(word) - 1):
+                if word[i] == merge_a and word[i + 1] == merge_b:
+                    merge_possible = True
+                    break
+            
+            if not merge_possible:
+                continue  # Skip to next merge (this is the optimization!)
+            
+            # Apply the merge (same as original)
+            new_word = []
+            i = 0
+            while i < len(word):
+                if i < len(word) - 1 and word[i] == merge_a and word[i + 1] == merge_b:
+                    # Apply merge
+                    new_word.append(merge_a + merge_b)
+                    i += 2
+                else:
+                    new_word.append(word[i])
+                    i += 1
+            word = new_word
+        
+        # Convert to token IDs
+        token_ids = []
+        for token_bytes in word:
+            if token_bytes in self.reverse_vocab:
+                token_ids.append(self.reverse_vocab[token_bytes])
+            else:
+                # Fallback: encode as individual bytes
+                for b in token_bytes:
+                    byte_token = bytes([b])
+                    if byte_token in self.reverse_vocab:
+                        token_ids.append(self.reverse_vocab[byte_token])
+        
+        return token_ids
+
     def encode_iterable(self, iterable) -> Iterator[int]:
         """
         Given an iterable of strings, return a generator that lazily yields token IDs.

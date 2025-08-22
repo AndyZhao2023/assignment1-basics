@@ -1,7 +1,7 @@
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use onig::Regex;
 use std::collections::{HashMap, HashSet, BinaryHeap};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::cmp::Ordering;
 use std::fs::{self, File};
 use std::io::{BufReader, Read, Write};
@@ -10,31 +10,277 @@ use std::time::Instant;
 use log::{info, error};
 use rayon::prelude::*;
 use indexmap::IndexMap;
+use serde_json;
 
 #[derive(Parser)]
 #[command(name = "bpe_trainer")]
-#[command(about = "Train a Byte Pair Encoding (BPE) tokenizer")]
-#[command(version = "1.0")]
+#[command(about = "Train and use Byte Pair Encoding (BPE) tokenizer")]
+#[command(version = "2.0")]
 struct Args {
-    /// Input text file path
-    #[arg(short, long)]
-    input: String,
-    
-    /// Target vocabulary size (must be >= 256)
-    #[arg(short, long)]
-    vocab_size: usize,
-    
-    /// Output directory for results
-    #[arg(short, long)]
-    output_dir: String,
-    
-    /// Special tokens (comma-separated)
-    #[arg(short, long, default_value = "<|endoftext|>")]
-    special_tokens: String,
+    #[command(subcommand)]
+    command: Commands,
     
     /// Verbose logging
-    #[arg(short, long)]
+    #[arg(short, long, global = true)]
     verbose: bool,
+}
+
+#[derive(Subcommand)]
+enum Commands {
+    /// Train a new BPE tokenizer
+    Train {
+        /// Input text file path
+        #[arg(short, long)]
+        input: String,
+        
+        /// Target vocabulary size (must be >= 256)
+        #[arg(short, long)]
+        vocab_size: usize,
+        
+        /// Output directory for results
+        #[arg(short, long)]
+        output_dir: String,
+        
+        /// Special tokens (comma-separated)
+        #[arg(short, long, default_value = "<|endoftext|>")]
+        special_tokens: String,
+    },
+}
+
+#[derive(Debug)]
+struct BpeTokenizer {
+    vocab: HashMap<String, usize>,
+    token_to_bytes: HashMap<usize, Vec<u8>>,
+    merges: Vec<(String, String)>,
+    special_tokens: Vec<String>,
+    regex: Regex,
+    word_cache: Arc<Mutex<HashMap<String, Vec<usize>>>>,
+}
+
+impl BpeTokenizer {
+    fn from_files(vocab_path: &str, merges_path: &str) -> Result<Self, Box<dyn std::error::Error>> {
+        info!("Loading BPE tokenizer from files...");
+        info!("Vocab file: {}", vocab_path);
+        info!("Merges file: {}", merges_path);
+        
+        // Load vocabulary
+        let vocab_content = fs::read_to_string(vocab_path)?;
+        let vocab_json: serde_json::Value = serde_json::from_str(&vocab_content)?;
+        
+        let mut vocab = HashMap::new();
+        let mut token_to_bytes = HashMap::new();
+        let mut special_tokens = Vec::new();
+        
+        if let Some(vocab_obj) = vocab_json.as_object() {
+            for (token_id_str, token_str_value) in vocab_obj {
+                let token_id: usize = token_id_str.parse()?;
+                let token_str = token_str_value.as_str().ok_or("Invalid token string")?;
+                
+                // Parse JSON-escaped string back to bytes
+                let token_bytes = parse_json_string(token_str)?;
+                
+                vocab.insert(String::from_utf8_lossy(&token_bytes).to_string(), token_id);
+                token_to_bytes.insert(token_id, token_bytes.clone());
+                
+                // Detect special tokens (typically high token IDs or contain special chars)
+                if token_id >= 256 && (token_str.contains("<|") || token_str.contains("|>")) {
+                    special_tokens.push(String::from_utf8_lossy(&token_bytes).to_string());
+                }
+            }
+        }
+        
+        // Load merges
+        let merges_content = fs::read_to_string(merges_path)?;
+        let mut merges = Vec::new();
+        
+        for line in merges_content.lines() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.len() == 2 {
+                merges.push((parts[0].to_string(), parts[1].to_string()));
+            }
+        }
+        
+        // Initialize GPT-2 regex pattern
+        let pattern = r"'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+";
+        let regex = Regex::new(pattern)?;
+        
+        info!("✓ Loaded {} vocabulary entries", vocab.len());
+        info!("✓ Loaded {} merge rules", merges.len());
+        info!("✓ Found {} special tokens", special_tokens.len());
+        
+        Ok(BpeTokenizer {
+            vocab,
+            token_to_bytes,
+            merges,
+            special_tokens,
+            regex,
+            word_cache: Arc::new(Mutex::new(HashMap::new())),
+        })
+    }
+    
+    fn encode(&self, text: &str) -> Vec<u16> {
+        self.encode_with_progress(text, false)
+    }
+    
+    fn encode_with_progress(&self, text: &str, show_progress: bool) -> Vec<u16> {
+        let mut tokens = Vec::new();
+        let mut pos = 0;
+        let text_len = text.len();
+        let start_time = Instant::now();
+        let mut last_log_mb = 0;
+        let mut word_count = 0;
+        
+        if show_progress {
+            info!("Starting tokenization: {:.1} MB text", text_len as f64 / 1024.0 / 1024.0);
+        }
+        
+        while pos < text.len() {
+            let search_content = &text[pos..];
+            if let Some((start, end)) = self.regex.find(search_content) {
+                let actual_start = pos + start;
+                let actual_end = pos + end;
+                let word = &text[actual_start..actual_end];
+                
+                // Use cached result if available
+                let word_tokens = {
+                    let mut cache = self.word_cache.lock().unwrap();
+                    if let Some(cached_tokens) = cache.get(word) {
+                        cached_tokens.clone()
+                    } else {
+                        let computed_tokens = self.encode_word_uncached(word);
+                        cache.insert(word.to_string(), computed_tokens.clone());
+                        computed_tokens
+                    }
+                };
+                
+                for token_id in word_tokens {
+                    if token_id <= u16::MAX as usize {
+                        tokens.push(token_id as u16);
+                    } else {
+                        error!("Token ID {} exceeds u16::MAX", token_id);
+                    }
+                }
+                
+                pos = actual_end;
+                word_count += 1;
+                
+                // Progress logging for large texts
+                if show_progress && text_len > 10_000_000 { // 10MB threshold
+                    let processed_mb = pos / (1024 * 1024);
+                    if processed_mb > last_log_mb + 50 { // Every 50MB
+                        let progress = (pos as f64 / text_len as f64) * 100.0;
+                        let elapsed = start_time.elapsed().as_secs_f64();
+                        let throughput = pos as f64 / elapsed / 1024.0 / 1024.0;
+                        info!("📝 Tokenization progress: {:.1}% | {:.1}MB | {} words → {} tokens | {:.1}MB/s", 
+                              progress, processed_mb as f64, word_count, tokens.len(), throughput);
+                        last_log_mb = processed_mb;
+                    }
+                }
+            } else {
+                break;
+            }
+        }
+        
+        if show_progress {
+            let duration = start_time.elapsed();
+            info!("✅ Tokenization complete: {} words → {} tokens in {:.2}s ({:.1}MB/s)",
+                  word_count, tokens.len(), duration.as_secs_f64(),
+                  text_len as f64 / duration.as_secs_f64() / 1024.0 / 1024.0);
+        }
+        
+        tokens
+    }
+    
+    fn encode_word_uncached(&self, word: &str) -> Vec<usize> {
+        // Start with byte-level tokenization
+        let mut word_tokens: Vec<String> = word.bytes()
+            .map(|b| String::from_utf8_lossy(&[b]).to_string())
+            .collect();
+        
+        // Optimized merge application - skip inapplicable merges
+        for (merge_first, merge_second) in &self.merges {
+            if word_tokens.len() < 2 {
+                break;
+            }
+            
+            // Quick check if this merge is applicable to avoid expensive iteration
+            let mut applicable = false;
+            for i in 0..word_tokens.len().saturating_sub(1) {
+                if word_tokens[i] == *merge_first && word_tokens[i + 1] == *merge_second {
+                    applicable = true;
+                    break;
+                }
+            }
+            
+            if !applicable {
+                continue; // Skip this merge - optimization!
+            }
+            
+            let mut new_word_tokens = Vec::new();
+            let mut i = 0;
+            
+            while i < word_tokens.len() {
+                if i < word_tokens.len() - 1 
+                    && word_tokens[i] == *merge_first 
+                    && word_tokens[i + 1] == *merge_second {
+                    // Apply merge
+                    let merged = format!("{}{}", merge_first, merge_second);
+                    new_word_tokens.push(merged);
+                    i += 2;
+                } else {
+                    new_word_tokens.push(word_tokens[i].clone());
+                    i += 1;
+                }
+            }
+            
+            word_tokens = new_word_tokens;
+        }
+        
+        // Convert tokens to IDs
+        word_tokens.into_iter()
+            .map(|token| self.vocab.get(&token).copied().unwrap_or(0)) // UNK token
+            .collect()
+    }
+}
+
+fn parse_json_string(json_str: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let mut bytes = Vec::new();
+    let mut chars = json_str.chars().peekable();
+    
+    while let Some(ch) = chars.next() {
+        if ch == '\\' {
+            match chars.next() {
+                Some('\\') => bytes.push(b'\\'),
+                Some('"') => bytes.push(b'"'),
+                Some('n') => bytes.push(b'\n'),
+                Some('r') => bytes.push(b'\r'),
+                Some('t') => bytes.push(b'\t'),
+                Some('u') => {
+                    // Parse \uXXXX unicode escape
+                    let mut hex_str = String::new();
+                    for _ in 0..4 {
+                        if let Some(hex_char) = chars.next() {
+                            hex_str.push(hex_char);
+                        }
+                    }
+                    if let Ok(unicode_val) = u32::from_str_radix(&hex_str, 16) {
+                        if unicode_val <= 255 {
+                            bytes.push(unicode_val as u8);
+                        }
+                    }
+                }
+                Some(c) => bytes.push(c as u8),
+                None => break,
+            }
+        } else {
+            bytes.push(ch as u8);
+        }
+    }
+    
+    Ok(bytes)
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -46,40 +292,45 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .format_timestamp_secs()
         .init();
     
-    // Validate arguments
-    if args.vocab_size < 256 {
-        error!("vocab_size must be >= 256, got {}", args.vocab_size);
-        std::process::exit(1);
-    }
-    
-    if !Path::new(&args.input).exists() {
-        error!("Input file does not exist: {}", args.input);
-        std::process::exit(1);
-    }
-    
-    // Parse special tokens
-    let special_tokens: Vec<String> = args.special_tokens
-        .split(',')
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .collect();
-    
-    println!("🦀 Pure Rust BPE Trainer");
-    println!("📁 Input: {}", args.input);
-    println!("🎯 Vocab size: {}", args.vocab_size);
-    println!("📂 Output: {}", args.output_dir);
-    println!("🏷️  Special tokens: {:?}", special_tokens);
-    
-    // Run BPE training
-    match train_bpe_tokenizer(&args.input, args.vocab_size, &special_tokens, &args.output_dir) {
-        Ok(_) => {
-            println!("✅ Training completed successfully!");
-            println!("📁 Results saved to: {}", args.output_dir);
+    match args.command {
+        Commands::Train { input, vocab_size, output_dir, special_tokens } => {
+            // Validate arguments
+            if vocab_size < 256 {
+                error!("vocab_size must be >= 256, got {}", vocab_size);
+                std::process::exit(1);
+            }
+            
+            if !Path::new(&input).exists() {
+                error!("Input file does not exist: {}", input);
+                std::process::exit(1);
+            }
+            
+            // Parse special tokens
+            let special_tokens_vec: Vec<String> = special_tokens
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+            
+            println!("🦀 Rust BPE Trainer v2.0");
+            println!("📁 Input: {}", input);
+            println!("🎯 Vocab size: {}", vocab_size);
+            println!("📂 Output: {}", output_dir);
+            println!("🏷️  Special tokens: {:?}", special_tokens_vec);
+            
+            // Run BPE training
+            match train_bpe_tokenizer(&input, vocab_size, &special_tokens_vec, &output_dir) {
+                Ok(_) => {
+                    println!("✅ Training completed successfully!");
+                    println!("📁 Results saved to: {}", output_dir);
+                }
+                Err(e) => {
+                    error!("Training failed: {}", e);
+                    std::process::exit(1);
+                }
+            }
         }
-        Err(e) => {
-            error!("Training failed: {}", e);
-            std::process::exit(1);
-        }
+        
     }
     
     Ok(())
@@ -738,6 +989,24 @@ fn merge_word_tokens(word: &[usize], target_pair: &(usize, usize), new_token_id:
     result
 }
 
+fn escape_json_string(bytes: &[u8]) -> String {
+    let mut result = String::new();
+    for &byte in bytes {
+        match byte {
+            b'"' => result.push_str("\\\""),
+            b'\\' => result.push_str("\\\\"),
+            b'\n' => result.push_str("\\n"),
+            b'\r' => result.push_str("\\r"),
+            b'\t' => result.push_str("\\t"),
+            0..=31 | 127..=255 => {
+                result.push_str(&format!("\\u{:04x}", byte));
+            }
+            _ => result.push(byte as char),
+        }
+    }
+    result
+}
+
 fn save_vocabulary(vocab: &HashMap<usize, Vec<u8>>, file_path: &str) -> Result<(), Box<dyn std::error::Error>> {
     let mut file = File::create(file_path)?;
     
@@ -746,9 +1015,8 @@ fn save_vocabulary(vocab: &HashMap<usize, Vec<u8>>, file_path: &str) -> Result<(
     entries.sort_by_key(|(id, _)| *id);
     
     for (i, (id, token_bytes)) in entries.iter().enumerate() {
-        let token_str = String::from_utf8_lossy(token_bytes);
         let comma = if i == entries.len() - 1 { "" } else { "," };
-        writeln!(file, "  \"{}\": \"{}\"{}",  id, token_str.escape_debug(), comma)?;
+        writeln!(file, "  \"{}\": \"{}\"{}",  id, escape_json_string(token_bytes), comma)?;
     }
     writeln!(file, "}}")?;
     
