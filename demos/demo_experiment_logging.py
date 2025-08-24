@@ -288,12 +288,14 @@ def demo_logging_factory():
         print(f"\nTesting {backend} backend...")
         
         # Create logger using factory
-        logger = create_logger(
-            backend=backend,
-            project_name="cs336_factory_demo",
-            experiment_name=f"{backend}_factory_test",
-            mode="offline" if backend == "wandb" else None
-        )
+        kwargs = {
+            "backend": backend,
+            "project_name": "cs336_factory_demo",
+            "experiment_name": f"{backend}_factory_test"
+        }
+        if backend == "wandb":
+            kwargs["mode"] = "offline"
+        logger = create_logger(**kwargs)
         
         # Log some test data
         logger.log_hyperparameters({"backend": backend, "test": True})
