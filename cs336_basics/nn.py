@@ -3,6 +3,7 @@ import torch.nn as nn
 from torch import Tensor
 from jaxtyping import Float, Int
 from collections.abc import Iterable
+import numpy as np
 import numpy.typing as npt
 import os
 from typing import BinaryIO, IO
@@ -752,9 +753,17 @@ def get_batch(dataset: npt.NDArray, batch_size: int, context_length: int, device
     
     for i, start_idx in enumerate(start_indices):
         # Input sequence: [start_idx, start_idx+1, ..., start_idx+context_length-1]
-        inputs[i] = torch.from_numpy(dataset[start_idx:start_idx + context_length])
+        # Convert to int32 if needed for PyTorch compatibility
+        input_slice = dataset[start_idx:start_idx + context_length]
+        if input_slice.dtype == np.uint16:
+            input_slice = input_slice.astype(np.int32)
+        inputs[i] = torch.from_numpy(input_slice)
+        
         # Label sequence: [start_idx+1, start_idx+2, ..., start_idx+context_length] 
-        labels[i] = torch.from_numpy(dataset[start_idx + 1:start_idx + context_length + 1])
+        label_slice = dataset[start_idx + 1:start_idx + context_length + 1]
+        if label_slice.dtype == np.uint16:
+            label_slice = label_slice.astype(np.int32)
+        labels[i] = torch.from_numpy(label_slice)
     
     # Move to specified device
     inputs = inputs.to(device)

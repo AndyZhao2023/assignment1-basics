@@ -9,7 +9,7 @@ import os
 import time
 import json
 from pathlib import Path
-from typing import Optional, Dict, Any
+from typing import Optional, Dict
 
 import numpy as np
 import torch
@@ -28,29 +28,20 @@ from cs336_basics.optimizer import AdamW, get_lr_cosine_schedule
 from cs336_basics.logger import create_logger, ExperimentLogger
 
 
-class TextDataset(Dataset):
-    """Memory-mapped text dataset for efficient large-scale training"""
+class TokenizedDataset(Dataset[Dict[str, np.ndarray]]):
+    """Memory-mapped pre-tokenized dataset for efficient large-scale training"""
     
-    def __init__(self, data_path: str, context_length: int):
+    def __init__(self, data_path: str, context_length: int) -> None:
         self.context_length = context_length
         
-        # Load tokenized data
-        if data_path.endswith('.npy'):
-            self.data = np.load(data_path, mmap_mode='r')
-        else:
-            # Assume it's raw text that needs tokenization
-            with open(data_path, 'r', encoding='utf-8') as f:
-                text = f.read()
-            
-            # Simple tokenization by character for demonstration
-            self.data = np.array([ord(c) for c in text], dtype=np.int32)
-        
-        print(f"Loaded dataset with {len(self.data):,} tokens")
+        # Load pre-tokenized data (always .npy format)
+        self.data = np.load(data_path, mmap_mode='r')
+        print(f"Loaded tokenized dataset with {len(self.data):,} tokens from {data_path}")
     
-    def __len__(self):
+    def __len__(self) -> int:
         return max(0, len(self.data) - self.context_length)
     
-    def __getitem__(self, idx):
+    def __getitem__(self, idx: int) -> Dict[str, np.ndarray]:
         # Get a sequence of context_length+1 tokens for input and target
         chunk = self.data[idx:idx + self.context_length + 1]
         return {
@@ -140,7 +131,7 @@ def train_step(
 
 def evaluate_model(
     model: torch.nn.Module,
-    dataset: Dataset,
+    val_dataset: TokenizedDataset,
     batch_size: int,
     device: str,
     max_batches: int = 50,
@@ -148,7 +139,7 @@ def evaluate_model(
     step: Optional[int] = None
 ) -> Dict[str, float]:
     """
-    Evaluate model on dataset.
+    Evaluate model on validation dataset.
     
     Returns:
         Dictionary of evaluation metrics
@@ -160,10 +151,10 @@ def evaluate_model(
     eval_start = time.time()
     
     with torch.no_grad():
-        for batch_idx in range(min(max_batches, len(dataset) // batch_size)):
-            # Sample batch
+        for batch_idx in range(min(max_batches, len(val_dataset) // batch_size)):
+            # Sample batch from validation data
             inputs, targets = get_batch(
-                dataset.data, batch_size, dataset.context_length, device
+                val_dataset.data, batch_size, val_dataset.context_length, device
             )
             
             # Forward pass
@@ -197,19 +188,19 @@ def evaluate_model(
 def main():
     parser = argparse.ArgumentParser(description='Train a Transformer Language Model with Experiment Logging')
     
-    # Model hyperparameters
-    parser.add_argument('--vocab_size', type=int, default=256, 
-                       help='Vocabulary size (default: 256 for character-level)')
-    parser.add_argument('--context_length', type=int, default=128,
-                       help='Maximum sequence length')
-    parser.add_argument('--d_model', type=int, default=256,
-                       help='Model dimension')
+    # Model hyperparameters (PDF-specified for 17M parameter model)
+    parser.add_argument('--vocab_size', type=int, default=10000, 
+                       help='Vocabulary size (10K BPE tokens from PDF)')
+    parser.add_argument('--context_length', type=int, default=256,
+                       help='Maximum sequence length (PDF specification)')
+    parser.add_argument('--d_model', type=int, default=512,
+                       help='Model dimension (PDF specification)')
     parser.add_argument('--num_layers', type=int, default=4,
-                       help='Number of transformer layers')
-    parser.add_argument('--num_heads', type=int, default=8,
-                       help='Number of attention heads')
-    parser.add_argument('--d_ff', type=int, default=1024,
-                       help='Feed-forward dimension')
+                       help='Number of transformer layers (PDF specification)')
+    parser.add_argument('--num_heads', type=int, default=16,
+                       help='Number of attention heads (PDF specification)')
+    parser.add_argument('--d_ff', type=int, default=1344,
+                       help='Feed-forward dimension (PDF specification)')
     parser.add_argument('--rope_theta', type=float, default=10000.0,
                        help='RoPE theta parameter')
     
@@ -238,6 +229,8 @@ def main():
                        help='Evaluation interval')
     parser.add_argument('--save_interval', type=int, default=500,
                        help='Checkpoint saving interval')
+    parser.add_argument('--validation_batches', type=int, default=50,
+                       help='Number of batches to use for validation')
     
     # Logging arguments
     parser.add_argument('--use_wandb', action='store_true',
@@ -256,8 +249,10 @@ def main():
                        help='Directory for local logging')
     
     # Data and paths
-    parser.add_argument('--data_path', type=str, default='data/sample.txt',
-                       help='Path to training data')
+    parser.add_argument('--data_path', type=str, default='artifacts/tinystories_tokens/TinyStoriesV2-GPT4-train_train.npy',
+                       help='Path to pre-tokenized training data (.npy file)')
+    parser.add_argument('--val_data_path', type=str, default='artifacts/tinystories_tokens/TinyStoriesV2-GPT4-train_val.npy',
+                       help='Path to pre-tokenized validation data (.npy file)')
     parser.add_argument('--checkpoint_dir', type=str, default='checkpoints',
                        help='Directory for saving checkpoints')
     parser.add_argument('--resume_from', type=str, default=None,
@@ -337,7 +332,8 @@ def main():
         "system/seed": args.seed,
         
         # Data
-        "data/path": args.data_path,
+        "data/train_path": args.data_path,
+        "data/val_path": args.val_data_path,
     }
     logger.log_hyperparameters(hyperparameters)
     
@@ -353,13 +349,16 @@ def main():
     # Log config as artifact
     logger.log_artifact(str(config_path), "training_config.json", "config")
     
-    # Load dataset
-    print("Loading dataset...")
-    train_dataset = TextDataset(args.data_path, args.context_length)
+    # Load datasets
+    print("Loading training dataset...")
+    train_dataset = TokenizedDataset(args.data_path, args.context_length)
+    
+    print("Loading validation dataset...")
+    val_dataset = TokenizedDataset(args.val_data_path, args.context_length)
     
     # Initialize model
     print("Initializing model...")
-    model = TransformerLM(
+    model: torch.nn.Module = TransformerLM(
         vocab_size=args.vocab_size,
         context_length=args.context_length,
         d_model=args.d_model,
@@ -384,7 +383,12 @@ def main():
     # Compile model if requested
     if args.compile:
         print("Compiling model...")
-        model = torch.compile(model)
+        if device == 'mps':
+            # MPS needs special backend according to PDF tips
+            model = torch.compile(model, backend="aot_eager")  # type: ignore[assignment]
+        else:
+            # CPU and CUDA can use default backend
+            model = torch.compile(model)  # type: ignore[assignment]
     
     # Initialize optimizer
     optimizer = AdamW(
@@ -398,7 +402,7 @@ def main():
     start_iter = 0
     if args.resume_from:
         print(f"Resuming from checkpoint: {args.resume_from}")
-        start_iter = load_checkpoint(args.resume_from, model, optimizer)
+        start_iter = load_checkpoint(args.resume_from, model, optimizer)  # type: ignore[arg-type]
         print(f"Resumed from iteration {start_iter}")
         logger.log_metrics({"training/resumed_from_iteration": start_iter}, step=start_iter)
     
@@ -485,8 +489,8 @@ def main():
         if iteration % args.eval_interval == 0 and iteration > 0:
             print("Evaluating...")
             eval_metrics = evaluate_model(
-                model, train_dataset, args.batch_size, device,
-                max_batches=50, logger=logger, step=iteration
+                model, val_dataset, args.batch_size, device,
+                max_batches=args.validation_batches, logger=logger, step=iteration
             )
             print(f"Eval loss: {eval_metrics['eval/loss']:.4f} | "
                   f"Eval perplexity: {eval_metrics['eval/perplexity']:.2f}")
@@ -496,7 +500,7 @@ def main():
         if iteration % args.save_interval == 0 and iteration > 0:
             checkpoint_path = checkpoint_dir / f"checkpoint_{iteration:06d}.pt"
             print(f"Saving checkpoint to {checkpoint_path}")
-            save_checkpoint(model, optimizer, iteration, checkpoint_path)
+            save_checkpoint(model, optimizer, iteration, checkpoint_path)  # type: ignore[arg-type]
             
             # Log checkpoint as artifact
             logger.log_artifact(str(checkpoint_path), f"checkpoint_{iteration:06d}.pt", "checkpoint")
@@ -504,14 +508,14 @@ def main():
     # Final checkpoint
     final_checkpoint_path = checkpoint_dir / "checkpoint_final.pt"
     print(f"Saving final checkpoint to {final_checkpoint_path}")
-    save_checkpoint(model, optimizer, args.max_iters, final_checkpoint_path)
+    save_checkpoint(model, optimizer, args.max_iters, final_checkpoint_path)  # type: ignore[arg-type]
     logger.log_artifact(str(final_checkpoint_path), "checkpoint_final.pt", "checkpoint")
     
     # Final evaluation
     print("\nFinal evaluation...")
     final_eval_metrics = evaluate_model(
-        model, train_dataset, args.batch_size, device,
-        max_batches=100, logger=logger, step=args.max_iters
+        model, val_dataset, args.batch_size, device,
+        max_batches=args.validation_batches * 2, logger=logger, step=args.max_iters
     )
     
     # Training summary
