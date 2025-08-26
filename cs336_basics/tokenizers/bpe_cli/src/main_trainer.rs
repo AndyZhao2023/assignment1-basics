@@ -990,6 +990,28 @@ fn merge_word_tokens(word: &[usize], target_pair: &(usize, usize), new_token_id:
 }
 
 fn escape_json_string(bytes: &[u8]) -> String {
+    // For single bytes 0-255, use a more direct approach
+    if bytes.len() == 1 {
+        let byte = bytes[0];
+        match byte {
+            // Standard printable ASCII (except quotes and backslashes)
+            32..=33 | 35..=91 | 93..=126 => {
+                return format!("{}", byte as char);
+            }
+            // Special escape sequences
+            b'"' => return "\\\"".to_string(),
+            b'\\' => return "\\\\".to_string(),
+            b'\n' => return "\\n".to_string(),
+            b'\r' => return "\\r".to_string(),
+            b'\t' => return "\\t".to_string(),
+            // All other bytes including high-bit bytes: use Unicode escape
+            _ => {
+                return format!("\\u{:04x}", byte);
+            }
+        }
+    }
+    
+    // For multi-byte tokens, use the old approach
     let mut result = String::new();
     for &byte in bytes {
         match byte {

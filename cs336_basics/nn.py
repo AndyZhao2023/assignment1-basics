@@ -6,6 +6,7 @@ from collections.abc import Iterable
 import numpy as np
 import numpy.typing as npt
 import os
+import sys
 from typing import BinaryIO, IO
 
 
@@ -886,7 +887,7 @@ def top_p_sampling(probs: Float[Tensor, "vocab_size"], p: float = 0.9) -> Int[Te
         keep_mask[0] = True
     else:
         # Include one more token after the threshold to ensure we have something to sample from
-        last_keep_idx = keep_mask.nonzero()[-1].item()
+        last_keep_idx = int(keep_mask.nonzero()[-1].item())
         if last_keep_idx < len(keep_mask) - 1:
             keep_mask[last_keep_idx + 1] = True
     
@@ -898,7 +899,7 @@ def top_p_sampling(probs: Float[Tensor, "vocab_size"], p: float = 0.9) -> Int[Te
     filtered_probs = filtered_probs / filtered_probs.sum()
     
     # Sample from the filtered distribution
-    sampled_idx = torch.multinomial(filtered_probs, num_samples=1).item()
+    sampled_idx = int(torch.multinomial(filtered_probs, num_samples=1).item())
     
     # Convert back to original vocabulary index
     return sorted_indices[sampled_idx]
@@ -927,6 +928,13 @@ def generate_text(model: 'TransformerLM',
         Generated text string including the original prompt
     """
     model.eval()
+    
+    # Validate model-tokenizer compatibility
+    if hasattr(tokenizer, 'vocab') and tokenizer.vocab is not None:
+        tokenizer_vocab_size = len(tokenizer.vocab)
+        if tokenizer_vocab_size != model.vocab_size:
+            print(f"Warning: Model vocab_size ({model.vocab_size}) != Tokenizer vocab_size ({tokenizer_vocab_size}). "
+                  f"This may cause generation issues.", file=sys.stderr)
     
     # Encode the prompt
     input_ids = tokenizer.encode(prompt)
@@ -958,17 +966,26 @@ def generate_text(model: 'TransformerLM',
             # Get logits for the last token (next token prediction)
             next_token_logits = logits[0, -1, :]  # Shape: (vocab_size,)
             
+            # Mask out problematic tokens (token 0 causes null bytes/blanks in output)
+            next_token_logits[0] = float('-inf')  # Prevent token 0 from being selected
+            
             # Apply temperature scaling
             probs = softmax_with_temperature(next_token_logits, temperature=temperature)
             
             # Sample using top-p sampling
             next_token = top_p_sampling(probs, p=top_p)
             
+            # Bounds checking to ensure token is within vocabulary range
+            token_id = next_token.item()
+            if token_id < 0 or token_id >= model.vocab_size:
+                print(f"Warning: Generated token ID {token_id} is out of vocabulary range [0, {model.vocab_size-1}]. Clamping to valid range.", file=sys.stderr)
+                token_id = max(0, min(token_id, model.vocab_size - 1))
+            
             # Add the new token to our sequence
-            generated_tokens.append(next_token.item())
+            generated_tokens.append(token_id)
             
             # Check if we generated the end-of-text token
-            if endoftext_token is not None and next_token.item() == endoftext_token:
+            if endoftext_token is not None and token_id == endoftext_token:
                 break
             
             # Update input tensor for next iteration

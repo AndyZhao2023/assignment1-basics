@@ -482,9 +482,22 @@ class Tokenizer:
         
         # Convert token IDs to bytes
         byte_sequence = b''
+        missing_tokens = []
+        
         for token_id in ids:
             if token_id in self.vocab:
                 byte_sequence += self.vocab[token_id]
+            else:
+                missing_tokens.append(token_id)
+                # Add a space as a placeholder for missing tokens to maintain readability
+                # This prevents silent token skipping that causes text gaps
+                byte_sequence += b' '
+        
+        # Log missing tokens for debugging (only if there are any)
+        if missing_tokens:
+            import sys
+            print(f"Warning: {len(missing_tokens)} token IDs not found in vocabulary: {missing_tokens[:10]}" + 
+                  ("..." if len(missing_tokens) > 10 else ""), file=sys.stderr)
         
         # Decode bytes to string, replacing malformed bytes with Unicode replacement character
         try:
