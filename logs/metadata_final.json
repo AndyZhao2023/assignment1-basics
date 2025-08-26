@@ -1,0 +1,8 @@
+{
+  "project": "cs336-training",
+  "experiment": "fixed_utf8_tokenizer_retrain",
+  "start_time": "2025-08-26T11:40:59.930934",
+  "end_time": "2025-08-26T13:12:15.587067",
+  "duration_hours": 1.521015594204267,
+  "total_steps": 0
+}

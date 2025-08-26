@@ -161,3 +161,39 @@ cython_debug/
 
 .ruff_cache/
 *.zip
+
+# CS336 Assignment 1 specific ignores
+# Debug and temporary analysis files
+debug_*.py
+*_debug.py
+demonstrate_*.py
+explain_*.py
+show_*.py
+visualize_*.py
+latin1_*.py
+simple_*.py
+test_tokenizer.py
+
+# Large data files
+*.txt
+!tests/fixtures/*.txt
+data/
+artifacts/tinystories_tokens*/
+artifacts/openwebtext_tokens/
+logs/artifacts/
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Model checkpoints (keep only essential ones tracked)
+*.pt
+*.pth
+!checkpoints/lr_3e-4_fixed_tokenizer/*.pt
+
+# Temporary files
+tmp/
+temp/
+*.tmp
