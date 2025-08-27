@@ -9,8 +9,6 @@ use std::path::Path;
 use std::time::Instant;
 use log::{info, error};
 use rayon::prelude::*;
-use indexmap::IndexMap;
-use serde_json;
 
 #[derive(Parser)]
 #[command(name = "bpe_trainer")]
@@ -47,241 +45,6 @@ enum Commands {
     },
 }
 
-#[derive(Debug)]
-struct BpeTokenizer {
-    vocab: HashMap<String, usize>,
-    token_to_bytes: HashMap<usize, Vec<u8>>,
-    merges: Vec<(String, String)>,
-    special_tokens: Vec<String>,
-    regex: Regex,
-    word_cache: Arc<Mutex<HashMap<String, Vec<usize>>>>,
-}
-
-impl BpeTokenizer {
-    fn from_files(vocab_path: &str, merges_path: &str) -> Result<Self, Box<dyn std::error::Error>> {
-        info!("Loading BPE tokenizer from files...");
-        info!("Vocab file: {}", vocab_path);
-        info!("Merges file: {}", merges_path);
-        
-        // Load vocabulary
-        let vocab_content = fs::read_to_string(vocab_path)?;
-        let vocab_json: serde_json::Value = serde_json::from_str(&vocab_content)?;
-        
-        let mut vocab = HashMap::new();
-        let mut token_to_bytes = HashMap::new();
-        let mut special_tokens = Vec::new();
-        
-        if let Some(vocab_obj) = vocab_json.as_object() {
-            for (token_id_str, token_str_value) in vocab_obj {
-                let token_id: usize = token_id_str.parse()?;
-                let token_str = token_str_value.as_str().ok_or("Invalid token string")?;
-                
-                // Parse JSON-escaped string back to bytes
-                let token_bytes = parse_json_string(token_str)?;
-                
-                vocab.insert(String::from_utf8_lossy(&token_bytes).to_string(), token_id);
-                token_to_bytes.insert(token_id, token_bytes.clone());
-                
-                // Detect special tokens (typically high token IDs or contain special chars)
-                if token_id >= 256 && (token_str.contains("<|") || token_str.contains("|>")) {
-                    special_tokens.push(String::from_utf8_lossy(&token_bytes).to_string());
-                }
-            }
-        }
-        
-        // Load merges
-        let merges_content = fs::read_to_string(merges_path)?;
-        let mut merges = Vec::new();
-        
-        for line in merges_content.lines() {
-            if line.trim().is_empty() {
-                continue;
-            }
-            let parts: Vec<&str> = line.split_whitespace().collect();
-            if parts.len() == 2 {
-                merges.push((parts[0].to_string(), parts[1].to_string()));
-            }
-        }
-        
-        // Initialize GPT-2 regex pattern
-        let pattern = r"'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+";
-        let regex = Regex::new(pattern)?;
-        
-        info!("✓ Loaded {} vocabulary entries", vocab.len());
-        info!("✓ Loaded {} merge rules", merges.len());
-        info!("✓ Found {} special tokens", special_tokens.len());
-        
-        Ok(BpeTokenizer {
-            vocab,
-            token_to_bytes,
-            merges,
-            special_tokens,
-            regex,
-            word_cache: Arc::new(Mutex::new(HashMap::new())),
-        })
-    }
-    
-    fn encode(&self, text: &str) -> Vec<u16> {
-        self.encode_with_progress(text, false)
-    }
-    
-    fn encode_with_progress(&self, text: &str, show_progress: bool) -> Vec<u16> {
-        let mut tokens = Vec::new();
-        let mut pos = 0;
-        let text_len = text.len();
-        let start_time = Instant::now();
-        let mut last_log_mb = 0;
-        let mut word_count = 0;
-        
-        if show_progress {
-            info!("Starting tokenization: {:.1} MB text", text_len as f64 / 1024.0 / 1024.0);
-        }
-        
-        while pos < text.len() {
-            let search_content = &text[pos..];
-            if let Some((start, end)) = self.regex.find(search_content) {
-                let actual_start = pos + start;
-                let actual_end = pos + end;
-                let word = &text[actual_start..actual_end];
-                
-                // Use cached result if available
-                let word_tokens = {
-                    let mut cache = self.word_cache.lock().unwrap();
-                    if let Some(cached_tokens) = cache.get(word) {
-                        cached_tokens.clone()
-                    } else {
-                        let computed_tokens = self.encode_word_uncached(word);
-                        cache.insert(word.to_string(), computed_tokens.clone());
-                        computed_tokens
-                    }
-                };
-                
-                for token_id in word_tokens {
-                    if token_id <= u16::MAX as usize {
-                        tokens.push(token_id as u16);
-                    } else {
-                        error!("Token ID {} exceeds u16::MAX", token_id);
-                    }
-                }
-                
-                pos = actual_end;
-                word_count += 1;
-                
-                // Progress logging for large texts
-                if show_progress && text_len > 10_000_000 { // 10MB threshold
-                    let processed_mb = pos / (1024 * 1024);
-                    if processed_mb > last_log_mb + 50 { // Every 50MB
-                        let progress = (pos as f64 / text_len as f64) * 100.0;
-                        let elapsed = start_time.elapsed().as_secs_f64();
-                        let throughput = pos as f64 / elapsed / 1024.0 / 1024.0;
-                        info!("📝 Tokenization progress: {:.1}% | {:.1}MB | {} words → {} tokens | {:.1}MB/s", 
-                              progress, processed_mb as f64, word_count, tokens.len(), throughput);
-                        last_log_mb = processed_mb;
-                    }
-                }
-            } else {
-                break;
-            }
-        }
-        
-        if show_progress {
-            let duration = start_time.elapsed();
-            info!("✅ Tokenization complete: {} words → {} tokens in {:.2}s ({:.1}MB/s)",
-                  word_count, tokens.len(), duration.as_secs_f64(),
-                  text_len as f64 / duration.as_secs_f64() / 1024.0 / 1024.0);
-        }
-        
-        tokens
-    }
-    
-    fn encode_word_uncached(&self, word: &str) -> Vec<usize> {
-        // Start with byte-level tokenization
-        let mut word_tokens: Vec<String> = word.bytes()
-            .map(|b| String::from_utf8_lossy(&[b]).to_string())
-            .collect();
-        
-        // Optimized merge application - skip inapplicable merges
-        for (merge_first, merge_second) in &self.merges {
-            if word_tokens.len() < 2 {
-                break;
-            }
-            
-            // Quick check if this merge is applicable to avoid expensive iteration
-            let mut applicable = false;
-            for i in 0..word_tokens.len().saturating_sub(1) {
-                if word_tokens[i] == *merge_first && word_tokens[i + 1] == *merge_second {
-                    applicable = true;
-                    break;
-                }
-            }
-            
-            if !applicable {
-                continue; // Skip this merge - optimization!
-            }
-            
-            let mut new_word_tokens = Vec::new();
-            let mut i = 0;
-            
-            while i < word_tokens.len() {
-                if i < word_tokens.len() - 1 
-                    && word_tokens[i] == *merge_first 
-                    && word_tokens[i + 1] == *merge_second {
-                    // Apply merge
-                    let merged = format!("{}{}", merge_first, merge_second);
-                    new_word_tokens.push(merged);
-                    i += 2;
-                } else {
-                    new_word_tokens.push(word_tokens[i].clone());
-                    i += 1;
-                }
-            }
-            
-            word_tokens = new_word_tokens;
-        }
-        
-        // Convert tokens to IDs
-        word_tokens.into_iter()
-            .map(|token| self.vocab.get(&token).copied().unwrap_or(0)) // UNK token
-            .collect()
-    }
-}
-
-fn parse_json_string(json_str: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-    let mut bytes = Vec::new();
-    let mut chars = json_str.chars().peekable();
-    
-    while let Some(ch) = chars.next() {
-        if ch == '\\' {
-            match chars.next() {
-                Some('\\') => bytes.push(b'\\'),
-                Some('"') => bytes.push(b'"'),
-                Some('n') => bytes.push(b'\n'),
-                Some('r') => bytes.push(b'\r'),
-                Some('t') => bytes.push(b'\t'),
-                Some('u') => {
-                    // Parse \uXXXX unicode escape
-                    let mut hex_str = String::new();
-                    for _ in 0..4 {
-                        if let Some(hex_char) = chars.next() {
-                            hex_str.push(hex_char);
-                        }
-                    }
-                    if let Ok(unicode_val) = u32::from_str_radix(&hex_str, 16) {
-                        if unicode_val <= 255 {
-                            bytes.push(unicode_val as u8);
-                        }
-                    }
-                }
-                Some(c) => bytes.push(c as u8),
-                None => break,
-            }
-        } else {
-            bytes.push(ch as u8);
-        }
-    }
-    
-    Ok(bytes)
-}
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
@@ -408,7 +171,6 @@ fn train_bpe_tokenizer(
     
     info!("Performing {} merges with ultra-optimized incremental algorithm...", target_merges);
     
-    // Use simple HashMap - avoid expensive IndexMap operations
     let mut word_token_counts: HashMap<Vec<usize>, u32> = word_token_counts;
     
     // Initial pair statistics with heap for efficient updates
@@ -607,167 +369,6 @@ fn get_best_pair_from_heap(
     None
 }
 
-fn apply_merge_with_inverted_index(
-    word_token_counts: &mut IndexMap<Vec<usize>, u32>,
-    pair_stats: &mut HashMap<(usize, usize), u32>,
-    pair_heap: &mut BinaryHeap<PairEntry>,
-    pair_to_words: &mut HashMap<(usize, usize), Vec<usize>>,
-    best_pair: &(usize, usize),
-    new_token_id: usize,
-    vocab: &HashMap<usize, Vec<u8>>,
-) {
-    // Use inverted index to get words containing the best pair - O(1) lookup!
-    let affected_word_indices = pair_to_words.get(best_pair).cloned().unwrap_or_default();
-    
-    // Collect affected words by index
-    let affected_words: Vec<(Vec<usize>, u32)> = affected_word_indices
-        .iter()
-        .filter_map(|&word_idx| {
-            let (word, &count) = word_token_counts.get_index(word_idx)?;
-            Some((word.clone(), count))
-        })
-        .collect();
-    
-    // Track pairs that will need heap updates
-    let mut affected_pairs = HashSet::new();
-    
-    // Remove old statistics and update inverted index
-    for (word, count) in &affected_words {
-        // Remove this word's contribution to pair statistics and inverted index
-        for i in 0..word.len().saturating_sub(1) {
-            let pair = (word[i], word[i + 1]);
-            affected_pairs.insert(pair);
-            
-            // Update pair statistics
-            if let Some(stat) = pair_stats.get_mut(&pair) {
-                *stat = stat.saturating_sub(*count);
-                if *stat == 0 {
-                    pair_stats.remove(&pair);
-                }
-            }
-            
-            // Update inverted index - remove word indices that no longer contain this pair
-            if let Some(word_indices) = pair_to_words.get_mut(&pair) {
-                word_indices.retain(|&idx| {
-                    if let Some((existing_word, _)) = word_token_counts.get_index(idx) {
-                        existing_word != word
-                    } else {
-                        false
-                    }
-                });
-                if word_indices.is_empty() {
-                    pair_to_words.remove(&pair);
-                }
-            }
-        }
-        
-        // Remove the old word from word_token_counts
-        word_token_counts.shift_remove(word);
-    }
-    
-    // Apply merge and add new statistics
-    for (word, count) in affected_words {
-        let merged_word = merge_word_tokens(&word, best_pair, new_token_id);
-        
-        // Add new word's contribution to pair statistics and inverted index
-        let new_word_idx = word_token_counts.len(); // Index where new word will be inserted
-        for i in 0..merged_word.len().saturating_sub(1) {
-            let pair = (merged_word[i], merged_word[i + 1]);
-            affected_pairs.insert(pair);
-            *pair_stats.entry(pair).or_insert(0) += count;
-            
-            // Update inverted index
-            pair_to_words.entry(pair).or_insert_with(Vec::new).push(new_word_idx);
-        }
-        
-        // Add the merged word
-        *word_token_counts.entry(merged_word).or_insert(0) += count;
-    }
-    
-    // Remove the merged pair from statistics and inverted index
-    pair_stats.remove(best_pair);
-    pair_to_words.remove(best_pair);
-    affected_pairs.remove(best_pair);
-    
-    // Update heap with affected pairs
-    for pair in affected_pairs {
-        if let Some(&count) = pair_stats.get(&pair) {
-            if count > 0 {
-                let tie_breaker = (vocab[&pair.0].clone(), vocab[&pair.1].clone());
-                pair_heap.push(PairEntry { pair, count, tie_breaker });
-            }
-        }
-    }
-}
-
-fn apply_merge_with_heap_update(
-    word_token_counts: &mut IndexMap<Vec<usize>, u32>,
-    pair_stats: &mut HashMap<(usize, usize), u32>,
-    pair_heap: &mut BinaryHeap<PairEntry>,
-    best_pair: &(usize, usize),
-    new_token_id: usize,
-    vocab: &HashMap<usize, Vec<u8>>,
-) {
-    // Collect words that contain the best pair
-    let affected_words: Vec<(Vec<usize>, u32)> = word_token_counts
-        .iter()
-        .filter(|(word, _)| {
-            word.windows(2).any(|w| w[0] == best_pair.0 && w[1] == best_pair.1)
-        })
-        .map(|(word, &count)| (word.clone(), count))
-        .collect();
-    
-    // Track pairs that will need heap updates
-    let mut affected_pairs = HashSet::new();
-    
-    // Remove old statistics for affected words
-    for (word, count) in &affected_words {
-        // Collect pairs from this word that will change
-        for i in 0..word.len().saturating_sub(1) {
-            let pair = (word[i], word[i + 1]);
-            affected_pairs.insert(pair);
-            
-            if let Some(stat) = pair_stats.get_mut(&pair) {
-                *stat = stat.saturating_sub(*count);
-                if *stat == 0 {
-                    pair_stats.remove(&pair);
-                }
-            }
-        }
-        
-        // Remove the old word from word_token_counts
-        word_token_counts.shift_remove(word);
-    }
-    
-    // Apply merge and add new statistics
-    for (word, count) in affected_words {
-        let merged_word = merge_word_tokens(&word, best_pair, new_token_id);
-        
-        // Add new word's contribution to pair statistics
-        for i in 0..merged_word.len().saturating_sub(1) {
-            let pair = (merged_word[i], merged_word[i + 1]);
-            affected_pairs.insert(pair);
-            *pair_stats.entry(pair).or_insert(0) += count;
-        }
-        
-        // Add the merged word
-        *word_token_counts.entry(merged_word).or_insert(0) += count;
-    }
-    
-    // Remove the merged pair from statistics
-    pair_stats.remove(best_pair);
-    affected_pairs.remove(best_pair);
-    
-    // Update heap with affected pairs
-    for pair in affected_pairs {
-        if let Some(&count) = pair_stats.get(&pair) {
-            if count > 0 {
-                let tie_breaker = (vocab[&pair.0].clone(), vocab[&pair.1].clone());
-                pair_heap.push(PairEntry { pair, count, tie_breaker });
-            }
-        }
-    }
-}
 
 fn compute_pair_statistics_simple(word_token_counts: &HashMap<Vec<usize>, u32>) -> HashMap<(usize, usize), u32> {
     // Use parallel processing for large vocabularies
@@ -871,99 +472,6 @@ fn apply_merge_simple(
     }
 }
 
-fn compute_pair_statistics_optimized(word_token_counts: &IndexMap<Vec<usize>, u32>) -> HashMap<(usize, usize), u32> {
-    // Use parallel processing for large vocabularies
-    if word_token_counts.len() > 10000 {
-        let words_vec: Vec<_> = word_token_counts.iter().collect();
-        words_vec
-            .par_iter()
-            .map(|(word, &count)| {
-                let mut local_stats = HashMap::new();
-                for i in 0..word.len().saturating_sub(1) {
-                    let pair = (word[i], word[i + 1]);
-                    *local_stats.entry(pair).or_insert(0) += count;
-                }
-                local_stats
-            })
-            .reduce(HashMap::new, |mut acc, local| {
-                for (pair, count) in local {
-                    *acc.entry(pair).or_insert(0) += count;
-                }
-                acc
-            })
-    } else {
-        // Use single-threaded for small vocabularies
-        let mut stats = HashMap::new();
-        for (word, &count) in word_token_counts {
-            for i in 0..word.len().saturating_sub(1) {
-                let pair = (word[i], word[i + 1]);
-                *stats.entry(pair).or_insert(0) += count;
-            }
-        }
-        stats
-    }
-}
-
-fn apply_merge_optimized(
-    word_token_counts: &mut IndexMap<Vec<usize>, u32>,
-    pair_stats: &mut HashMap<(usize, usize), u32>,
-    best_pair: &(usize, usize),
-    new_token_id: usize,
-) {
-    // Collect words that contain the best pair
-    let affected_words: Vec<(Vec<usize>, u32)> = word_token_counts
-        .iter()
-        .filter(|(word, _)| {
-            word.windows(2).any(|w| w[0] == best_pair.0 && w[1] == best_pair.1)
-        })
-        .map(|(word, &count)| (word.clone(), count))
-        .collect();
-    
-    // Remove old statistics for affected words
-    for (word, count) in &affected_words {
-        // Remove this word's contribution to pair statistics
-        for i in 0..word.len().saturating_sub(1) {
-            let pair = (word[i], word[i + 1]);
-            if let Some(stat) = pair_stats.get_mut(&pair) {
-                *stat = stat.saturating_sub(*count);
-                if *stat == 0 {
-                    pair_stats.remove(&pair);
-                }
-            }
-        }
-        
-        // Remove the old word from word_token_counts
-        word_token_counts.shift_remove(word);
-    }
-    
-    // Apply merge and add new statistics
-    for (word, count) in affected_words {
-        let merged_word = merge_word_tokens(&word, best_pair, new_token_id);
-        
-        // Add new word's contribution to pair statistics
-        for i in 0..merged_word.len().saturating_sub(1) {
-            let pair = (merged_word[i], merged_word[i + 1]);
-            *pair_stats.entry(pair).or_insert(0) += count;
-        }
-        
-        // Add the merged word
-        *word_token_counts.entry(merged_word).or_insert(0) += count;
-    }
-    
-    // Remove the merged pair from statistics
-    pair_stats.remove(best_pair);
-}
-
-fn find_best_pair(stats: &HashMap<(usize, usize), u32>, vocab: &HashMap<usize, Vec<u8>>) -> (usize, usize) {
-    stats
-        .iter()
-        .max_by_key(|(&pair, &count)| {
-            // Tie-breaking: prefer lexicographically smaller bytes for determinism
-            (count, std::cmp::Reverse((&vocab[&pair.0], &vocab[&pair.1])))
-        })
-        .map(|(&pair, _)| pair)
-        .expect("No pairs found")
-}
 
 
 fn merge_word_tokens(word: &[usize], target_pair: &(usize, usize), new_token_id: usize) -> Vec<usize> {
@@ -1060,10 +568,8 @@ fn save_merges(merges: &[(Vec<u8>, Vec<u8>)], file_path: &str) -> Result<(), Box
 fn parallel_pretokenize_file(
     file_path: &str,
     regex: &Regex,
-    file_size: u64,
+    _file_size: u64,
 ) -> Result<HashMap<Vec<u8>, u32>, Box<dyn std::error::Error>> {
-    use std::sync::Mutex;
-    
     const CHUNK_SIZE: usize = 64 * 1024 * 1024; // 64MB chunks for better parallelization
     let file = File::open(file_path)?;
     let mut reader = BufReader::new(file);
@@ -1071,7 +577,6 @@ fn parallel_pretokenize_file(
     let mut chunks = Vec::new();
     let mut buffer = vec![0u8; CHUNK_SIZE];
     let mut overlap_buffer = String::new();
-    let mut total_processed = 0u64;
     
     info!("Reading file into {}MB chunks for parallel processing", CHUNK_SIZE / 1024 / 1024);
     
@@ -1110,7 +615,6 @@ fn parallel_pretokenize_file(
         chunks.push(process_text.to_string());
         overlap_buffer = remaining.to_string();
         
-        total_processed += bytes_read as u64;
     }
     
     info!("Split file into {} chunks, processing in parallel", chunks.len());
