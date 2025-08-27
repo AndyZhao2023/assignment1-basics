@@ -2,8 +2,7 @@ mod tokenizer_optimized;
 mod save_optimized;
 
 use clap::{Parser, Subcommand};
-use std::fs::{self, File};
-use std::io::{Write, BufWriter};
+use std::fs;
 use std::path::Path;
 use std::time::Instant;
 use tokenizer_optimized::OptimizedBpeTokenizer;
@@ -64,49 +63,6 @@ fn split_dataset(text: &str, split_ratio: f64) -> (String, String) {
     (train_text, val_text)
 }
 
-fn save_tokens_as_npy(tokens: &[u16], output_path: &str) -> Result<(), Box<dyn std::error::Error>> {
-    log::info!("Saving {} tokens to {}", tokens.len(), output_path);
-    
-    // Create output directory
-    if let Some(parent) = Path::new(output_path).parent() {
-        fs::create_dir_all(parent)?;
-    }
-    
-    let mut file = File::create(output_path)?;
-    
-    // NPY magic number
-    file.write_all(b"\x93NUMPY")?;
-    
-    // Version 1.0
-    file.write_all(&[0x01, 0x00])?;
-    
-    // Create header
-    let shape_str = format!("({},)", tokens.len());
-    let header = format!(
-        "{{'descr': '<u2', 'fortran_order': False, 'shape': {}}}", 
-        shape_str
-    );
-    
-    // Pad header to 64-byte boundary
-    let header_len = header.len();
-    let padding_len = (64 - (10 + header_len) % 64) % 64;
-    let padded_header = format!("{}{}", header, " ".repeat(padding_len));
-    
-    // Write header length (little-endian u16)
-    let total_header_len = padded_header.len() as u16;
-    file.write_all(&total_header_len.to_le_bytes())?;
-    
-    // Write padded header
-    file.write_all(padded_header.as_bytes())?;
-    
-    // Write data as little-endian u16 values
-    for &token in tokens {
-        file.write_all(&token.to_le_bytes())?;
-    }
-    
-    log::info!("✓ Saved {} tokens to {}", tokens.len(), output_path);
-    Ok(())
-}
 
 fn tokenize_dataset(
     tokenizer: &OptimizedBpeTokenizer,

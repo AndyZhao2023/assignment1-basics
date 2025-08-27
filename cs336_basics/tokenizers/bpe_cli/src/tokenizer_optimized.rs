@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use fxhash::FxHashMap;
 use rayon::prelude::*;
@@ -10,11 +9,9 @@ use std::num::NonZeroUsize;
 #[derive(Debug)]
 pub struct OptimizedBpeTokenizer {
     vocab: FxHashMap<Vec<u8>, usize>,
-    merges: Vec<(Vec<u8>, Vec<u8>)>,
     merge_ranks: FxHashMap<(Vec<u8>, Vec<u8>), usize>,
     regex: Regex,
     word_cache: Arc<Mutex<LruCache<String, Vec<usize>>>>,
-    special_tokens: Vec<String>,
 }
 
 impl OptimizedBpeTokenizer {
@@ -26,7 +23,6 @@ impl OptimizedBpeTokenizer {
         let vocab_json: serde_json::Value = serde_json::from_str(&vocab_content)?;
         
         let mut vocab = FxHashMap::default();
-        let mut special_tokens = Vec::new();
         
         if let Some(vocab_obj) = vocab_json.as_object() {
             for (token_id_str, token_str_value) in vocab_obj {
@@ -34,18 +30,12 @@ impl OptimizedBpeTokenizer {
                 let token_str = token_str_value.as_str().ok_or("Invalid token string")?;
                 let token_bytes = parse_json_string(token_str)?;
                 
-                vocab.insert(token_bytes.clone(), token_id);
-                
-                // Detect special tokens
-                if token_id >= 256 && (token_str.contains("<|") || token_str.contains("|>")) {
-                    special_tokens.push(String::from_utf8_lossy(&token_bytes).to_string());
-                }
+                vocab.insert(token_bytes, token_id);
             }
         }
         
         // Load merges and build rank map
         let merges_content = std::fs::read_to_string(merges_path)?;
-        let mut merges = Vec::new();
         let mut merge_ranks = FxHashMap::default();
         
         for (rank, line) in merges_content.lines().enumerate() {
@@ -56,8 +46,7 @@ impl OptimizedBpeTokenizer {
             if parts.len() == 2 {
                 let first = parts[0].as_bytes().to_vec();
                 let second = parts[1].as_bytes().to_vec();
-                merge_ranks.insert((first.clone(), second.clone()), rank);
-                merges.push((first, second));
+                merge_ranks.insert((first, second), rank);
             }
         }
         
@@ -68,15 +57,13 @@ impl OptimizedBpeTokenizer {
         // Create LRU cache with 100K capacity
         let word_cache = Arc::new(Mutex::new(LruCache::new(NonZeroUsize::new(100_000).unwrap())));
         
-        log::info!("✓ Loaded {} vocab entries, {} merges", vocab.len(), merges.len());
+        log::info!("✓ Loaded {} vocab entries, {} merges", vocab.len(), merge_ranks.len());
         
         Ok(Self {
             vocab,
-            merges,
             merge_ranks,
             regex,
             word_cache,
-            special_tokens,
         })
     }
     
