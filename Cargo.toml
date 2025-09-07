@@ -1,0 +1,32 @@
+[workspace]
+resolver = "2"
+
+# Define workspace members (Rust crates in the project)
+members = [
+    "cs336_basics/tokenizers/bpe_cli"
+]
+
+# Exclude broken crates until they're fixed
+exclude = [
+    "cs336_basics/tokenizers/bpe_pymodule"
+]
+
+# Shared dependencies across workspace members
+[workspace.dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+log = "0.4"
+env_logger = "0.10"
+onig = "6.4"
+rayon = "1.10"
+
+# Workspace-level profile settings
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+
+[profile.dev]
+debug = true
+opt-level = 0
