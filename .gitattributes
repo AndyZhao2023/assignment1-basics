@@ -1,7 +1,6 @@
 # Large data files
 data/*.txt filter=lfs diff=lfs merge=lfs -text
 data/*.npy filter=lfs diff=lfs merge=lfs -text
-
 # Model checkpoints
 *.pt filter=lfs diff=lfs merge=lfs -text
 *.pth filter=lfs diff=lfs merge=lfs -text
@@ -17,3 +16,5 @@ artifacts/**/*.npy filter=lfs diff=lfs merge=lfs -text
 target/** filter=lfs diff=lfs merge=lfs -text
 **/target/** filter=lfs diff=lfs merge=lfs -text
 *.txt filter=lfs diff=lfs merge=lfs -text
+data/owt_train.txt filter=lfs diff=lfs merge=lfs -text
+data/TinyStoriesV2-GPT4-train.txt filter=lfs diff=lfs merge=lfs -text
